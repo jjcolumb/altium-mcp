@@ -1107,6 +1107,10 @@ begin
             Result := ExecuteSearchLibrarySymbol(RequestData);
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
+        'get_schematic_objects':
+            Result := GetSchematicObjects(RequestData);
+        'schematic_edit':
+            Result := ExecuteSchematicEdit(RequestData);
     else
         LogScriptError('Error: Unknown command: ' + CommandName);
     end;

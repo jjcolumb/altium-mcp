@@ -158,7 +158,9 @@ begin
        (CommandName = 'create_symbols_batch') or
        (CommandName = 'get_footprint_primitives') or
        (CommandName = 'create_footprints_batch') or
-       (CommandName = 'create_pcb_footprint') then
+       (CommandName = 'create_pcb_footprint') or
+       (CommandName = 'get_schematic_objects') or
+       (CommandName = 'schematic_edit') then
     begin
         Result := True;
         Exit;
