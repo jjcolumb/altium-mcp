@@ -2664,6 +2664,9 @@ async def get_server_status(ctx: Context) -> str:
     
     return json.dumps(status, indent=2)
 
+from schematic_tools import register_schematic_tools
+register_schematic_tools(mcp, altium_bridge, logger)
+
 if __name__ == "__main__":
     logger.info("Starting Altium MCP Server...")
     logger.info(f"Using MCP directory: {MCP_DIR}")

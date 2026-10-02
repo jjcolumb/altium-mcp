@@ -1,0 +1,361 @@
+"""
+Schematic editing tools: read back one sheet and edit an EXISTING schematic.
+
+Kept in its own module so the fork can pull upstream changes to main.py with
+minimal conflicts; main.py only calls register_schematic_tools().
+
+The DelphiScript side (AltiumScript/schematic_edit.pas and schematic_read.pas)
+is derived from altium-mcp by altium-mcp contributors (flaco-source),
+https://github.com/flaco-source/altium-mcp, MIT License. See NOTICE.
+
+None of these tools save the document. Edits land in Altium as one undo step
+each; the user reviews and saves (or presses Ctrl+Z) in Altium.
+"""
+import json
+from typing import Optional
+
+from mcp.server.fastmcp import Context
+
+
+def _format_number(value) -> str:
+    """Plain decimal text (no exponent) for the DelphiScript point parser."""
+    text = format(float(value), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _points_to_csv(points: list) -> str:
+    """[[x1, y1], [x2, y2], ...] -> "x1,y1,x2,y2,..."; raises ValueError if malformed."""
+    if not isinstance(points, list):
+        raise ValueError("points must be a list of [x, y] pairs")
+    numbers = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError(f"each point must be [x, y], got {point!r}")
+        for coord in point:
+            if isinstance(coord, bool) or not isinstance(coord, (int, float)):
+                raise ValueError(f"coordinates must be numbers, got {coord!r}")
+            numbers.append(_format_number(coord))
+    return ",".join(numbers)
+
+
+def register_schematic_tools(mcp, altium_bridge, logger):
+    """Register the schematic read/edit tools on the server's FastMCP instance."""
+
+    async def _schematic_edit(action: str, params: dict) -> str:
+        logger.info(f"Schematic edit '{action}': {params}")
+        response = await altium_bridge.execute_command("schematic_edit", {"action": action, **params})
+
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error in schematic edit '{action}': {error_msg}")
+            return json.dumps({"success": False, "error": f"Schematic edit '{action}' failed: {error_msg}"})
+
+        result = response.get("result", {})
+        logger.info(f"Schematic edit '{action}' applied (not saved)")
+        return json.dumps({"success": True, "result": result}, indent=2)
+
+    @mcp.tool()
+    async def get_schematic_objects(ctx: Context, schematic_path: str) -> str:
+        """
+        Read back everything on ONE schematic sheet, for checking schematic edits.
+
+        Returns components (designator, lib_reference, position, rotation, mirrored,
+        parameters, and every pin with its connection point - the end a wire must
+        touch), wires and buses (all vertices), bus entries, net labels, power ports
+        (net name and style), junctions, ports, text labels and sheet settings.
+        All coordinates are absolute sheet coordinates in mils.
+
+        Reads the sheet as it is in Altium, including unsaved edits. Opens the sheet
+        if it is not already open.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+
+        Returns:
+            str: JSON object with the sheet contents
+        """
+        logger.info(f"Getting schematic objects for {schematic_path}")
+
+        response = await altium_bridge.execute_command(
+            "get_schematic_objects",
+            {"schematic_path": schematic_path}
+        )
+
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error getting schematic objects: {error_msg}")
+            return json.dumps({"success": False, "error": f"Failed to get schematic objects: {error_msg}"})
+
+        return json.dumps(response.get("result", {}), indent=2)
+
+    @mcp.tool()
+    async def sch_move_component(ctx: Context, schematic_path: str, cmp_designator: str,
+                                 x: Optional[float] = None, y: Optional[float] = None,
+                                 rotation: Optional[float] = None) -> str:
+        """
+        Move and/or rotate a component on an existing schematic sheet (absolute values).
+
+        The designator and parameter text move with the part. Rotation is absolute and
+        snapped to 0, 90, 180 or 270 degrees. Omitted values are left unchanged. Returns
+        the new pin connection points so wires can be routed to them.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            cmp_designator (str): Designator of the component (e.g. "R1")
+            x (float): New absolute X of the component origin in mils (optional)
+            y (float): New absolute Y of the component origin in mils (optional)
+            rotation (float): New absolute rotation in degrees (optional)
+
+        Returns:
+            str: JSON object with the result of the edit
+        """
+        params = {"schematic_path": schematic_path, "designator": cmp_designator}
+        if x is not None:
+            params["x"] = x
+        if y is not None:
+            params["y"] = y
+        if rotation is not None:
+            params["rotation"] = rotation
+        return await _schematic_edit("move_component", params)
+
+    @mcp.tool()
+    async def sch_set_component_parameters(ctx: Context, schematic_path: str, cmp_designator: str,
+                                           parameters: dict) -> str:
+        """
+        Set parameter values on a component on an existing schematic sheet.
+
+        Existing parameters (matched by name, case-insensitive, e.g. "Comment", "Value")
+        are updated in place. Parameters that do not exist are created as hidden string
+        parameters. Values may contain any text, including commas.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            cmp_designator (str): Designator of the component (e.g. "R1")
+            parameters (dict): Parameter name -> new value, e.g. {"Value": "10k", "Tolerance": "1%"}
+
+        Returns:
+            str: JSON object listing the updated and newly created parameters
+        """
+        if not isinstance(parameters, dict) or not parameters:
+            return json.dumps({"success": False, "error": "parameters must be a non-empty object of name -> value"})
+        return await _schematic_edit("set_component_parameters", {
+            "schematic_path": schematic_path,
+            "designator": cmp_designator,
+            "parameter_names": [str(name) for name in parameters.keys()],
+            "parameter_values": [str(value) for value in parameters.values()],
+        })
+
+    @mcp.tool()
+    async def sch_place_component(ctx: Context, schematic_path: str, library_path: str, lib_reference: str,
+                                  designator: str, x: float, y: float, rotation: float = 0) -> str:
+        """
+        Place a symbol from a schematic library (.SchLib) onto an existing schematic sheet.
+
+        Use search_library_symbol to find the lib_reference first. Fails if the designator
+        already exists on the sheet. Returns the placed part's pin connection points so
+        wires can be routed to them.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            library_path (str): Full path to the .SchLib containing the symbol
+            lib_reference (str): Symbol name in the library (e.g. "RES-DISCRETE")
+            designator (str): Designator for the new part (e.g. "R12")
+            x (float): Absolute X of the component origin in mils
+            y (float): Absolute Y of the component origin in mils
+            rotation (float): Rotation in degrees (0, 90, 180, 270)
+
+        Returns:
+            str: JSON object with the placed component and its pins
+        """
+        return await _schematic_edit("place_component", {
+            "schematic_path": schematic_path,
+            "library_path": library_path,
+            "lib_reference": lib_reference,
+            "designator": designator,
+            "x": x,
+            "y": y,
+            "rotation": rotation,
+        })
+
+    @mcp.tool()
+    async def sch_add_wire(ctx: Context, schematic_path: str, points: list) -> str:
+        """
+        Draw one wire through a list of points on an existing schematic sheet.
+
+        A wire connects to a pin only where its end touches the pin's connection point
+        (from get_schematic_objects or the pins returned by sch_place_component). Keep
+        segments horizontal or vertical. Junction dots are not added automatically.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            points (list): Vertices in mils, at least two, e.g. [[1000, 2000], [1500, 2000], [1500, 2500]]
+
+        Returns:
+            str: JSON object with the vertices of the new wire
+        """
+        try:
+            csv = _points_to_csv(points)
+        except ValueError as e:
+            return json.dumps({"success": False, "error": str(e)})
+        return await _schematic_edit("add_wire", {"schematic_path": schematic_path, "points": csv})
+
+    @mcp.tool()
+    async def sch_add_bus(ctx: Context, schematic_path: str, points: list) -> str:
+        """
+        Draw one bus through a list of points on an existing schematic sheet.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            points (list): Vertices in mils, at least two, e.g. [[1000, 2000], [1000, 3000]]
+
+        Returns:
+            str: JSON object with the vertices of the new bus
+        """
+        try:
+            csv = _points_to_csv(points)
+        except ValueError as e:
+            return json.dumps({"success": False, "error": str(e)})
+        return await _schematic_edit("add_bus", {"schematic_path": schematic_path, "points": csv})
+
+    @mcp.tool()
+    async def sch_add_bus_entry(ctx: Context, schematic_path: str, x1: float, y1: float,
+                                x2: float, y2: float) -> str:
+        """
+        Add a bus entry (the short diagonal between a bus and a wire) on an existing sheet.
+
+        Usually (x1, y1) is on the bus and (x2, y2) is offset 100 mils diagonally, where
+        the wire starts.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            x1 (float): Start X in mils
+            y1 (float): Start Y in mils
+            x2 (float): End X in mils
+            y2 (float): End Y in mils
+
+        Returns:
+            str: JSON object with the bus entry end points
+        """
+        csv = _points_to_csv([[x1, y1], [x2, y2]])
+        return await _schematic_edit("add_bus_entry", {"schematic_path": schematic_path, "points": csv})
+
+    @mcp.tool()
+    async def sch_add_net_label(ctx: Context, schematic_path: str, net_name: str, x: float, y: float,
+                                rotation: float = 0) -> str:
+        """
+        Add a net label on an existing schematic sheet.
+
+        The label names the net only if its location lies exactly on a wire.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            net_name (str): Net name (e.g. "SDA")
+            x (float): X in mils (on a wire)
+            y (float): Y in mils (on a wire)
+            rotation (float): Rotation in degrees (0, 90, 180, 270)
+
+        Returns:
+            str: JSON object with the new net label
+        """
+        return await _schematic_edit("add_net_label", {
+            "schematic_path": schematic_path,
+            "net_name": net_name,
+            "x": x,
+            "y": y,
+            "rotation": rotation,
+        })
+
+    @mcp.tool()
+    async def sch_add_power_port(ctx: Context, schematic_path: str, net_name: str, x: float, y: float,
+                                 style: str = "", rotation: float = 0, show_net_name: bool = True) -> str:
+        """
+        Add a power port (VCC, GND, 3V3, ...) on an existing schematic sheet.
+
+        The port connects at its location, so place it on a wire end or pin connection
+        point. Rotation 0 points the symbol up (typical for supplies); 270 points it down
+        (typical for ground).
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            net_name (str): Net name (e.g. "GND", "3V3")
+            x (float): X in mils
+            y (float): Y in mils
+            style (str): One of "bar", "arrow", "circle", "wave", "gnd_power", "gnd_signal",
+                "gnd_earth". Empty picks "gnd_power" for nets containing GND, otherwise "bar".
+            rotation (float): Rotation in degrees (0, 90, 180, 270)
+            show_net_name (bool): Show the net name next to the symbol
+
+        Returns:
+            str: JSON object with the new power port
+        """
+        return await _schematic_edit("add_power_port", {
+            "schematic_path": schematic_path,
+            "net_name": net_name,
+            "x": x,
+            "y": y,
+            "style": style,
+            "rotation": rotation,
+            "show_net_name": show_net_name,
+        })
+
+    @mcp.tool()
+    async def sch_add_text(ctx: Context, schematic_path: str, text: str, x: float, y: float,
+                           rotation: float = 0) -> str:
+        """
+        Add a free text label (a note, not a net label) on an existing schematic sheet.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            text (str): Text to show
+            x (float): X in mils
+            y (float): Y in mils
+            rotation (float): Rotation in degrees (0, 90, 180, 270)
+
+        Returns:
+            str: JSON object with the new text label
+        """
+        return await _schematic_edit("add_text", {
+            "schematic_path": schematic_path,
+            "text": text,
+            "x": x,
+            "y": y,
+            "rotation": rotation,
+        })
