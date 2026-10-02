@@ -139,6 +139,18 @@ The server provides several tools to interact with Altium Designer:
 
 ![Symbol Creator](assets/symbol_creator.gif)
 
+### Schematic Editing
+Edit an existing schematic sheet in place. Every tool takes an explicit `schematic_path` (it never edits whatever sheet happens to be focused), applies the change as one undo step, and **never saves** - review in Altium, then save or undo. Tool descriptions tell the agent to read the sheet back with `get_schematic_objects` after each edit. Coordinates are absolute sheet coordinates in mils.
+- `get_schematic_objects`: Read back one sheet: components with parameters and every pin's connection point, wires and buses (all vertices), bus entries, net labels, power ports, junctions, ports, text labels, and sheet settings. Includes unsaved edits.
+- `sch_move_component`: Move and/or rotate a component; its text moves with it.
+- `sch_set_component_parameters`: Update parameters by name, or create missing ones (hidden).
+- `sch_place_component`: Place a symbol from a .SchLib, returning its pin connection points.
+- `sch_add_wire` / `sch_add_bus`: Draw a wire or bus through a list of points.
+- `sch_add_bus_entry`: Add a bus entry.
+- `sch_add_net_label` / `sch_add_power_port` / `sch_add_text`: Add a net label, power port (bar, arrow, circle, wave, ground styles) or free text.
+
+The DelphiScript for these tools is derived from [flaco-source/altium-mcp](https://github.com/flaco-source/altium-mcp) (MIT). See [NOTICE](NOTICE).
+
 ### Layout Operations
 - `get_all_nets`: Returns a list of unique nets from the pcb
 - `create_net_class` ([YouTube](https://youtu.be/89booqRbnzQ)): Create a net class from a list of nets
@@ -191,6 +203,7 @@ The server communicates with Altium Designer using a scripting bridge:
 - Matija Markovic and Petar Perisin Distribute Script: For understanding how to properly let the GUI know when I've updated tracks' nets
 - Petar Perisin's Room from Poly: Used as reference to detect poly to pad overlap since I couldn't get more tradition methods to work.
 - Petar Perisin's Layer Panel Script: Used as reference for getting layers and changing layer visibility
+- flaco-source/altium-mcp (MIT, altium-mcp contributors): schematic editing and sheet read-back scripts that `schematic_edit.pas` and `schematic_read.pas` are derived from. https://github.com/flaco-source/altium-mcp
 - Jeff Collins has an XIA_Release_Manager.pas script that taught me the art of the Output Job. See his post on the Altium Forums: https://forum.live.altium.com/#/posts/189423
 
 ## Contributors
