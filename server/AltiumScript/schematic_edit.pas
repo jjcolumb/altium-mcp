@@ -4,7 +4,7 @@
 { The schematic_edit command: one edit action on an EXISTING schematic sheet.  }
 { Actions: move_component, set_component_parameters, place_component,         }
 { add_wire, add_bus, add_bus_entry, add_junction, add_net_label,              }
-{ add_power_port, add_text.                                                    }
+{ add_power_port, add_port, add_text.                                          }
 {                                                                              }
 { Every edit is wrapped in PreProcess/PostProcess (one undo step), new objects }
 { are registered with the robot manager, and modified objects are bracketed by }
@@ -555,6 +555,99 @@ begin
     end;
 end;
 
+// Sheet port. Location is one end; it also connects at the end Width away
+// (along X for left/right/none styles, along Y for top/bottom styles).
+function SchEditAddPort(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    Name, StyleName, IOName: String;
+    X, Y, W: Double;
+    HasX, HasY, HasW, ValidX, ValidY, ValidW: Boolean;
+    Style, IOType: Integer;
+    Obj: ISch_Port;
+    Props: TStringList;
+begin
+    Name := SchMcpGetString(RequestData, 'name');
+    X := SchMcpGetFloat(RequestData, 'x', HasX, ValidX);
+    Y := SchMcpGetFloat(RequestData, 'y', HasY, ValidY);
+    W := SchMcpGetFloat(RequestData, 'width', HasW, ValidW);
+    StyleName := LowerCase(SchMcpGetString(RequestData, 'style'));
+    IOName := LowerCase(SchMcpGetString(RequestData, 'io_type'));
+
+    if Trim(Name) = '' then
+    begin
+        Result := 'ERROR: name is required';
+        Exit;
+    end;
+    if not (HasX and HasY) then
+    begin
+        Result := 'ERROR: x and y are required';
+        Exit;
+    end;
+    if not (ValidX and ValidY and ValidW) then
+    begin
+        Result := 'ERROR: x, y and width must be numbers';
+        Exit;
+    end;
+    if not HasW then W := 600;
+    if W <= 0 then
+    begin
+        Result := 'ERROR: width must be positive';
+        Exit;
+    end;
+
+    if (StyleName = '') or (StyleName = 'right') then Style := ePortRight
+    else if StyleName = 'none' then Style := ePortNone
+    else if StyleName = 'left' then Style := ePortLeft
+    else if StyleName = 'left_right' then Style := ePortLeftRight
+    else if StyleName = 'top' then Style := ePortTop
+    else if StyleName = 'bottom' then Style := ePortBottom
+    else if StyleName = 'top_bottom' then Style := ePortTopBottom
+    else
+    begin
+        Result := 'ERROR: unknown port style: ' + StyleName;
+        Exit;
+    end;
+
+    if (IOName = '') or (IOName = 'unspecified') then IOType := ePortUnspecified
+    else if IOName = 'output' then IOType := ePortOutput
+    else if IOName = 'input' then IOType := ePortInput
+    else if IOName = 'bidirectional' then IOType := ePortBidirectional
+    else
+    begin
+        Result := 'ERROR: unknown port io_type: ' + IOName;
+        Exit;
+    end;
+
+    Obj := SchServer.SchObjectFactory(ePort, eCreate_GlobalCopy);
+    if Obj = nil then
+    begin
+        Result := 'ERROR: Could not create port';
+        Exit;
+    end;
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Obj.Name := Name;
+    Obj.IOType := IOType;
+    Obj.Style := Style;
+    // Fixed size: with AutoSize on, Altium stretches the port to fit its name,
+    // which moves the far connection point away from the requested width.
+    Obj.AutoSize := False;
+    Obj.Width := MilsToCoord(W);
+    SchEditRegister(SchDoc, Obj);
+
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'name', Obj.Name);
+        AddJSONProperty(Props, 'io_type', SchMcpPortIOTypeName(Obj.IOType));
+        AddJSONProperty(Props, 'style', SchMcpPortStyleName(Obj.Style));
+        AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+        AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+        AddJSONNumber(Props, 'width', CoordToMils(Obj.Width));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Net labels, power ports and text labels: a point object with text.
 function SchEditAddPointObject(SchDoc: ISch_Document; RequestData: TStringList; Action: String): String;
 var
@@ -658,7 +751,8 @@ begin
     if (Action <> 'move_component') and (Action <> 'set_component_parameters') and
        (Action <> 'place_component') and (Action <> 'add_wire') and (Action <> 'add_bus') and
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and
-       (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') then
+       (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') and
+       (Action <> 'add_port') then
     begin
         Result := 'ERROR: Unknown schematic_edit action: ' + Action;
         Exit;
@@ -688,6 +782,8 @@ begin
             Inner := SchEditAddBusEntry(SchDoc, RequestData)
         else if Action = 'add_junction' then
             Inner := SchEditAddJunction(SchDoc, RequestData)
+        else if Action = 'add_port' then
+            Inner := SchEditAddPort(SchDoc, RequestData)
         else
             Inner := SchEditAddPointObject(SchDoc, RequestData, Action);
     finally

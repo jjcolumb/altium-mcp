@@ -149,6 +149,7 @@ Edit an existing schematic sheet in place. Every tool takes an explicit `schemat
 - `sch_add_wire` / `sch_add_bus`: Draw a wire or bus through a list of points.
 - `sch_add_bus_entry`: Add a bus entry.
 - `sch_add_junction`: Add a junction, e.g. to connect two crossing wires.
+- `sch_add_port`: Add a sheet port (name, width, arrow style, I/O type).
 - `sch_add_net_label` / `sch_add_power_port` / `sch_add_text`: Add a net label, power port (bar, arrow, circle, wave, ground styles) or free text.
 
 The DelphiScript for these tools is derived from [flaco-source/altium-mcp](https://github.com/flaco-source/altium-mcp) (MIT). See [NOTICE](NOTICE).

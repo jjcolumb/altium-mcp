@@ -291,6 +291,42 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         return await _schematic_edit("add_junction", {"schematic_path": schematic_path, "x": x, "y": y})
 
     @mcp.tool()
+    async def sch_add_port(ctx: Context, schematic_path: str, name: str, x: float, y: float,
+                           width: float = 600, style: str = "right", io_type: str = "unspecified") -> str:
+        """
+        Add a sheet port (connects a net to other sheets) on an existing schematic sheet.
+
+        A port connects at BOTH ends: at (x, y) and at the end `width` away - (x + width, y)
+        for horizontal styles, (x, y + width) for "top"/"bottom"/"top_bottom". Wire to
+        either end.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            name (str): Port / net name (e.g. "MOT_IN1")
+            x (float): X of one end in mils
+            y (float): Y of one end in mils
+            width (float): Length of the port in mils (fixed; not auto-sized to the name)
+            style (str): Arrow shape: "none", "left", "right", "left_right", "top", "bottom", "top_bottom"
+            io_type (str): "unspecified", "output", "input" or "bidirectional"
+
+        Returns:
+            str: JSON object with the new port
+        """
+        return await _schematic_edit("add_port", {
+            "schematic_path": schematic_path,
+            "name": name,
+            "x": x,
+            "y": y,
+            "width": width,
+            "style": style,
+            "io_type": io_type,
+        })
+
+    @mcp.tool()
     async def check_schematic_connectivity(ctx: Context, schematic_path: str) -> str:
         """
         Check the wiring of ONE schematic sheet and list its nets. Read-only.

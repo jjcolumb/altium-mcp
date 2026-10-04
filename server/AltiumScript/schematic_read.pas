@@ -322,6 +322,27 @@ begin
     else Result := IntToStr(Style);
 end;
 
+function SchMcpPortStyleName(Style: Integer): String;
+begin
+    if Style = ePortNone then Result := 'none'
+    else if Style = ePortLeft then Result := 'left'
+    else if Style = ePortRight then Result := 'right'
+    else if Style = ePortLeftRight then Result := 'left_right'
+    else if Style = ePortTop then Result := 'top'
+    else if Style = ePortBottom then Result := 'bottom'
+    else if Style = ePortTopBottom then Result := 'top_bottom'
+    else Result := IntToStr(Style);
+end;
+
+function SchMcpPortIOTypeName(IOType: Integer): String;
+begin
+    if IOType = ePortUnspecified then Result := 'unspecified'
+    else if IOType = ePortOutput then Result := 'output'
+    else if IOType = ePortInput then Result := 'input'
+    else if IOType = ePortBidirectional then Result := 'bidirectional'
+    else Result := IntToStr(IOType);
+end;
+
 function SchMcpPointJSON(X, Y: Integer): String;
 var
     Props: TStringList;
@@ -506,7 +527,8 @@ begin
         else if Obj.ObjectId = ePort then
         begin
             AddJSONProperty(Props, 'name', Obj.Name);
-            AddJSONInteger(Props, 'io_type', Obj.IOType);
+            AddJSONProperty(Props, 'io_type', SchMcpPortIOTypeName(Obj.IOType));
+            AddJSONProperty(Props, 'style', SchMcpPortStyleName(Obj.Style));
             AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONNumber(Props, 'width', CoordToMils(Obj.Width));
