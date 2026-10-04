@@ -5,7 +5,8 @@
 { Actions: move_component, set_component_parameters, set_component_text,      }
 { place_component,                                                             }
 { add_wire, add_bus, add_bus_entry, add_junction, add_net_label,              }
-{ add_power_port, add_port, add_text, and create_sheet (a new file).          }
+{ add_power_port, add_port, add_text, delete_objects, modify_object, and     }
+{ create_sheet (a new file).                                                   }
 {                                                                              }
 { Every edit is wrapped in PreProcess/PostProcess (one undo step), new objects }
 { are registered with the robot manager, and modified objects are bracketed by }
@@ -987,6 +988,535 @@ begin
 end;
 
 {..............................................................................}
+{ Selecting existing objects (delete_objects, modify_object).                  }
+{ Objects have no stable ids, so a selector names an object the way            }
+{ get_schematic_objects reports it: kind + location (+ text) for point         }
+{ objects, the full vertex list for wires/buses, both ends for bus entries,    }
+{ the designator for components. A selector must match exactly one object.    }
+{..............................................................................}
+
+function SchEditKindToObjectId(Kind: String; var Id: Integer): Boolean;
+begin
+    Result := True;
+    if Kind = 'component' then Id := eSchComponent
+    else if Kind = 'wire' then Id := eWire
+    else if Kind = 'bus' then Id := eBus
+    else if Kind = 'bus_entry' then Id := eBusEntry
+    else if Kind = 'junction' then Id := eJunction
+    else if Kind = 'net_label' then Id := eNetLabel
+    else if Kind = 'power_port' then Id := ePowerObject
+    else if Kind = 'port' then Id := ePort
+    else if Kind = 'text' then Id := eLabel
+    else if Kind = 'off_sheet_connector' then Id := eCrossSheetConnector
+    else if Kind = 'no_erc' then Id := eNoERC
+    else Result := False;
+end;
+
+function SchEditSelectorText(Obj: ISch_GraphicalObject; Kind: String): String;
+begin
+    if Kind = 'component' then Result := Obj.Designator.Text
+    else if Kind = 'port' then Result := Obj.Name
+    else if (Kind = 'net_label') or (Kind = 'power_port') or (Kind = 'text') or (Kind = 'off_sheet_connector') then
+        Result := Obj.Text
+    else Result := '';
+end;
+
+// True if Obj matches the selector. Coords holds the parsed point list for
+// wire/bus/bus_entry selectors (already validated).
+function SchEditMatches(Obj: ISch_GraphicalObject; Kind, Txt: String; X, Y: Integer; Coords: TStringList): Boolean;
+var
+    V: Integer;
+begin
+    Result := False;
+    if Kind = 'component' then
+        Result := UpperCase(Trim(Obj.Designator.Text)) = UpperCase(Trim(Txt))
+    else if (Kind = 'wire') or (Kind = 'bus') then
+    begin
+        if Obj.VerticesCount * 2 <> Coords.Count then
+            Exit;
+        for V := 1 to Obj.VerticesCount do
+            if (CoordToMils(Obj.Vertex[V].X) <> Round(SafeStrToFloat(Coords[(V - 1) * 2]))) or
+               (CoordToMils(Obj.Vertex[V].Y) <> Round(SafeStrToFloat(Coords[(V - 1) * 2 + 1]))) then
+                Exit;
+        Result := True;
+    end
+    else if Kind = 'bus_entry' then
+    begin
+        Result := ((CoordToMils(Obj.Location.X) = Round(SafeStrToFloat(Coords[0]))) and
+                   (CoordToMils(Obj.Location.Y) = Round(SafeStrToFloat(Coords[1]))) and
+                   (CoordToMils(Obj.Corner.X) = Round(SafeStrToFloat(Coords[2]))) and
+                   (CoordToMils(Obj.Corner.Y) = Round(SafeStrToFloat(Coords[3])))) or
+                  ((CoordToMils(Obj.Location.X) = Round(SafeStrToFloat(Coords[2]))) and
+                   (CoordToMils(Obj.Location.Y) = Round(SafeStrToFloat(Coords[3]))) and
+                   (CoordToMils(Obj.Corner.X) = Round(SafeStrToFloat(Coords[0]))) and
+                   (CoordToMils(Obj.Corner.Y) = Round(SafeStrToFloat(Coords[1]))));
+    end
+    else
+    begin
+        Result := (CoordToMils(Obj.Location.X) = X) and (CoordToMils(Obj.Location.Y) = Y);
+        if Result and (Txt <> '') then
+            Result := SchEditSelectorText(Obj, Kind) = Txt;
+    end;
+end;
+
+// Resolve one selector to exactly one object. Returns '' or 'ERROR: ...'.
+function SchEditResolveSelector(SchDoc: ISch_Document; Kind, XS, YS, Txt, Points: String;
+    var Found: ISch_GraphicalObject): String;
+var
+    Id, X, Y, Count: Integer;
+    Coords: TStringList;
+    Iter: ISch_Iterator;
+    Obj: ISch_GraphicalObject;
+    Desc: String;
+begin
+    Result := '';
+    Found := nil;
+    Kind := LowerCase(Trim(Kind));
+    if not SchEditKindToObjectId(Kind, Id) then
+    begin
+        Result := 'ERROR: unknown object kind "' + Kind + '"';
+        Exit;
+    end;
+
+    Coords := TStringList.Create;
+    try
+        X := 0;
+        Y := 0;
+        if Kind = 'component' then
+        begin
+            if Trim(Txt) = '' then
+            begin
+                Result := 'ERROR: a component selector needs its designator';
+                Exit;
+            end;
+            Desc := 'component ' + Txt;
+        end
+        else if (Kind = 'wire') or (Kind = 'bus') or (Kind = 'bus_entry') then
+        begin
+            Result := SchEditParsePoints(Points, 2, Coords);
+            if Result <> '' then
+            begin
+                Result := Result + ' (' + Kind + ' selector)';
+                Exit;
+            end;
+            if (Kind = 'bus_entry') and (Coords.Count <> 4) then
+            begin
+                Result := 'ERROR: a bus_entry selector needs exactly its 2 end points';
+                Exit;
+            end;
+            Desc := Kind + ' through ' + Points;
+        end
+        else
+        begin
+            if not (SchMcpIsNumber(XS) and SchMcpIsNumber(YS)) then
+            begin
+                Result := 'ERROR: a ' + Kind + ' selector needs numeric x and y';
+                Exit;
+            end;
+            X := Round(SafeStrToFloat(XS));
+            Y := Round(SafeStrToFloat(YS));
+            Desc := Kind + ' at (' + IntToStr(X) + ', ' + IntToStr(Y) + ')';
+            if Txt <> '' then
+                Desc := Desc + ' "' + Txt + '"';
+        end;
+
+        Count := 0;
+        Iter := SchDoc.SchIterator_Create;
+        Iter.SetState_IterationDepth(eIterateFirstLevel);
+        Iter.AddFilter_ObjectSet(MkSet(Id));
+        Obj := Iter.FirstSchObject;
+        while Obj <> nil do
+        begin
+            if SchEditMatches(Obj, Kind, Txt, X, Y, Coords) then
+            begin
+                Count := Count + 1;
+                Found := Obj;
+            end;
+            Obj := Iter.NextSchObject;
+        end;
+        SchDoc.SchIterator_Destroy(Iter);
+
+        if Count = 0 then
+        begin
+            Found := nil;
+            Result := 'ERROR: no ' + Desc + ' on the sheet (read it back with get_schematic_objects)';
+        end
+        else if Count > 1 then
+        begin
+            Found := nil;
+            Result := 'ERROR: ' + IntToStr(Count) + ' objects match ' + Desc + '; add its text to tell them apart';
+        end;
+    finally
+        Coords.Free;
+    end;
+end;
+
+function SchEditDescribe(Obj: ISch_GraphicalObject; Kind: String): String;
+var
+    Props: TStringList;
+begin
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'kind', Kind);
+        if (Kind = 'wire') or (Kind = 'bus') then
+            Props.Add('"vertices": ' + SchMcpVerticesJSON(Obj))
+        else if Kind = 'bus_entry' then
+        begin
+            AddJSONNumber(Props, 'x1', CoordToMils(Obj.Location.X));
+            AddJSONNumber(Props, 'y1', CoordToMils(Obj.Location.Y));
+            AddJSONNumber(Props, 'x2', CoordToMils(Obj.Corner.X));
+            AddJSONNumber(Props, 'y2', CoordToMils(Obj.Corner.Y));
+        end
+        else
+        begin
+            if SchEditSelectorText(Obj, Kind) <> '' then
+                AddJSONProperty(Props, 'text', SchEditSelectorText(Obj, Kind));
+            AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+            AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+            if (Kind = 'net_label') or (Kind = 'power_port') or (Kind = 'text') or (Kind = 'component') then
+                AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
+            if Kind = 'power_port' then
+                AddJSONProperty(Props, 'style', SchMcpPowerStyleName(Obj.Style));
+            if Kind = 'port' then
+            begin
+                AddJSONProperty(Props, 'style', SchMcpPortStyleName(Obj.Style));
+                AddJSONProperty(Props, 'io_type', SchMcpPortIOTypeName(Obj.IOType));
+                AddJSONNumber(Props, 'width', CoordToMils(Obj.Width));
+            end;
+        end;
+        Result := BuildJSONObject(Props, 1);
+    finally
+        Props.Free;
+    end;
+end;
+
+// Delete every selected object as one undo step. All selectors are resolved
+// first; if any fails (or two select the same object) nothing is deleted.
+function SchEditDeleteObjects(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    Kinds, Xs, Ys, Txts, Pts, Done, Props: TStringList;
+    Targets: TInterfaceList;
+    Obj: ISch_GraphicalObject;
+    i, j: Integer;
+    Err: String;
+begin
+    Kinds := TStringList.Create;
+    Xs := TStringList.Create;
+    Ys := TStringList.Create;
+    Txts := TStringList.Create;
+    Pts := TStringList.Create;
+    Done := TStringList.Create;
+    Targets := TInterfaceList.Create;
+    try
+        SchMcpGetStringArray(RequestData, 'sel_kind', Kinds);
+        SchMcpGetStringArray(RequestData, 'sel_x', Xs);
+        SchMcpGetStringArray(RequestData, 'sel_y', Ys);
+        SchMcpGetStringArray(RequestData, 'sel_text', Txts);
+        SchMcpGetStringArray(RequestData, 'sel_points', Pts);
+        if (Kinds.Count = 0) or (Xs.Count <> Kinds.Count) or (Ys.Count <> Kinds.Count) or
+           (Txts.Count <> Kinds.Count) or (Pts.Count <> Kinds.Count) then
+        begin
+            Result := 'ERROR: selector arrays must be non-empty and the same length';
+            Exit;
+        end;
+
+        for i := 0 to Kinds.Count - 1 do
+        begin
+            Err := SchEditResolveSelector(SchDoc, Kinds[i], Xs[i], Ys[i], Txts[i], Pts[i], Obj);
+            if Err <> '' then
+            begin
+                Result := Err + ' - nothing was deleted';
+                Exit;
+            end;
+            for j := 0 to Targets.Count - 1 do
+                if Targets.Items[j].I_ObjectAddress = Obj.I_ObjectAddress then
+                begin
+                    Result := 'ERROR: two selectors name the same object (#' + IntToStr(j + 1) + ' and #' +
+                              IntToStr(i + 1) + ') - nothing was deleted';
+                    Exit;
+                end;
+            Targets.Add(Obj);
+            Done.Add(SchEditDescribe(Obj, LowerCase(Trim(Kinds[i]))));
+        end;
+
+        for i := 0 to Targets.Count - 1 do
+        begin
+            Obj := Targets.Items[i];
+            SchDoc.RemoveSchObject(Obj);
+            SchServer.RobotManager.SendMessage(SchDoc.I_ObjectAddress, c_BroadCast,
+                SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
+        end;
+
+        Props := TStringList.Create;
+        try
+            AddJSONInteger(Props, 'deleted_count', Targets.Count);
+            Props.Add(BuildJSONArray(Done, 'deleted'));
+            Result := BuildJSONObject(Props);
+        finally
+            Props.Free;
+        end;
+    finally
+        Targets.Free;
+        Done.Free;
+        Pts.Free;
+        Txts.Free;
+        Ys.Free;
+        Xs.Free;
+        Kinds.Free;
+    end;
+end;
+
+// Change properties of one existing object. Only properties sent as new_*
+// change; everything is validated before anything is touched. Components are
+// changed with move_component / set_component_parameters / set_component_text.
+function SchEditModifyObject(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    Kinds, Xs, Ys, Txts, Pts, Coords, Props: TStringList;
+    Kind, NewText, StyleName, IOName, Err: String;
+    Obj, NewObj: ISch_GraphicalObject;
+    NX, NY, NRot, NW: Double;
+    HasX, HasY, HasRot, HasW, VX, VY, VRot, VW: Boolean;
+    Style, IOType, V, i: Integer;
+    HasPoints, IsPoint, HasFormat: Boolean;
+begin
+    Kinds := TStringList.Create;
+    Xs := TStringList.Create;
+    Ys := TStringList.Create;
+    Txts := TStringList.Create;
+    Pts := TStringList.Create;
+    Coords := TStringList.Create;
+    try
+        SchMcpGetStringArray(RequestData, 'sel_kind', Kinds);
+        SchMcpGetStringArray(RequestData, 'sel_x', Xs);
+        SchMcpGetStringArray(RequestData, 'sel_y', Ys);
+        SchMcpGetStringArray(RequestData, 'sel_text', Txts);
+        SchMcpGetStringArray(RequestData, 'sel_points', Pts);
+        if (Kinds.Count <> 1) or (Xs.Count <> 1) or (Ys.Count <> 1) or (Txts.Count <> 1) or (Pts.Count <> 1) then
+        begin
+            Result := 'ERROR: modify_object takes exactly one selector';
+            Exit;
+        end;
+        Kind := LowerCase(Trim(Kinds[0]));
+        if Kind = 'component' then
+        begin
+            Result := 'ERROR: change components with sch_move_component, sch_set_component_parameters or sch_set_component_text';
+            Exit;
+        end;
+        IsPoint := (Kind <> 'wire') and (Kind <> 'bus') and (Kind <> 'bus_entry');
+
+        // Validate the changes.
+        NX := SchMcpGetFloat(RequestData, 'new_x', HasX, VX);
+        NY := SchMcpGetFloat(RequestData, 'new_y', HasY, VY);
+        NRot := SchMcpGetFloat(RequestData, 'new_rotation', HasRot, VRot);
+        NW := SchMcpGetFloat(RequestData, 'new_width', HasW, VW);
+        if not (VX and VY and VRot and VW) then
+        begin
+            Result := 'ERROR: new x, y, rotation and width must be numbers';
+            Exit;
+        end;
+        NewText := SchMcpGetString(RequestData, 'new_text');
+        StyleName := SchMcpGetString(RequestData, 'new_style');
+        IOName := LowerCase(SchMcpGetString(RequestData, 'new_io_type'));
+        HasPoints := SchMcpGetString(RequestData, 'new_points') <> '';
+        HasFormat := SchMcpHasKey(RequestData, 'font_name') or SchMcpHasKey(RequestData, 'font_size') or
+                     SchMcpHasKey(RequestData, 'bold') or SchMcpHasKey(RequestData, 'italic') or
+                     SchMcpHasKey(RequestData, 'underline') or SchMcpHasKey(RequestData, 'color') or
+                     SchMcpHasKey(RequestData, 'justification');
+
+        if (HasX or HasY) and not IsPoint then
+        begin
+            Result := 'ERROR: move a ' + Kind + ' by giving new points, not x/y';
+            Exit;
+        end;
+        if HasPoints and IsPoint then
+        begin
+            Result := 'ERROR: new points only apply to wires, buses and bus entries';
+            Exit;
+        end;
+        if HasPoints then
+        begin
+            Err := SchEditParsePoints(SchMcpGetString(RequestData, 'new_points'), 2, Coords);
+            if (Err = '') and (Kind = 'bus_entry') and (Coords.Count <> 4) then
+                Err := 'ERROR: a bus entry takes exactly 2 points';
+            if Err <> '' then
+            begin
+                Result := Err;
+                Exit;
+            end;
+        end;
+        if HasRot and not ((Kind = 'net_label') or (Kind = 'power_port') or (Kind = 'text') or
+                           (Kind = 'off_sheet_connector')) then
+        begin
+            Result := 'ERROR: a ' + Kind + ' has no rotation';
+            Exit;
+        end;
+        if (NewText <> '') and not ((Kind = 'net_label') or (Kind = 'power_port') or (Kind = 'text') or
+                                    (Kind = 'port') or (Kind = 'off_sheet_connector')) then
+        begin
+            Result := 'ERROR: a ' + Kind + ' has no text';
+            Exit;
+        end;
+        if StyleName <> '' then
+        begin
+            if Kind = 'power_port' then
+            begin
+                if not SchEditParsePowerStyle(StyleName, Style) then
+                begin
+                    Result := 'ERROR: unknown power port style: ' + StyleName;
+                    Exit;
+                end;
+            end
+            else if Kind = 'port' then
+            begin
+                StyleName := LowerCase(StyleName);
+                if StyleName = 'none' then Style := ePortNone
+                else if StyleName = 'left' then Style := ePortLeft
+                else if StyleName = 'right' then Style := ePortRight
+                else if StyleName = 'left_right' then Style := ePortLeftRight
+                else if StyleName = 'top' then Style := ePortTop
+                else if StyleName = 'bottom' then Style := ePortBottom
+                else if StyleName = 'top_bottom' then Style := ePortTopBottom
+                else
+                begin
+                    Result := 'ERROR: unknown port style: ' + StyleName;
+                    Exit;
+                end;
+            end
+            else
+            begin
+                Result := 'ERROR: a ' + Kind + ' has no style';
+                Exit;
+            end;
+        end;
+        if (HasW or (IOName <> '')) and (Kind <> 'port') then
+        begin
+            Result := 'ERROR: width and io_type only apply to ports';
+            Exit;
+        end;
+        if HasW and (NW <= 0) then
+        begin
+            Result := 'ERROR: width must be positive';
+            Exit;
+        end;
+        if IOName <> '' then
+        begin
+            if IOName = 'unspecified' then IOType := ePortUnspecified
+            else if IOName = 'output' then IOType := ePortOutput
+            else if IOName = 'input' then IOType := ePortInput
+            else if IOName = 'bidirectional' then IOType := ePortBidirectional
+            else
+            begin
+                Result := 'ERROR: unknown port io_type: ' + IOName;
+                Exit;
+            end;
+        end;
+        if HasFormat and (Kind <> 'text') then
+        begin
+            Result := 'ERROR: font, color and justification only apply to text';
+            Exit;
+        end;
+
+        Err := SchEditResolveSelector(SchDoc, Kind, Xs[0], Ys[0], Txts[0], Pts[0], Obj);
+        if Err <> '' then
+        begin
+            Result := Err;
+            Exit;
+        end;
+
+        // Apply.
+        if HasPoints and ((Kind = 'wire') or (Kind = 'bus')) then
+        begin
+            // Rebuild the polyline with the new vertices (same undo step).
+            if Kind = 'bus' then
+                NewObj := SchServer.SchObjectFactory(eBus, eCreate_GlobalCopy)
+            else
+                NewObj := SchServer.SchObjectFactory(eWire, eCreate_GlobalCopy);
+            NewObj.Location := Point(SchEditCoord(Coords, 0), SchEditCoord(Coords, 1));
+            V := 0;
+            i := 0;
+            while i < Coords.Count do
+            begin
+                V := V + 1;
+                NewObj.InsertVertex := V;
+                NewObj.SetState_Vertex(V, Point(SchEditCoord(Coords, i), SchEditCoord(Coords, i + 1)));
+                i := i + 2;
+            end;
+            SchDoc.RemoveSchObject(Obj);
+            SchServer.RobotManager.SendMessage(SchDoc.I_ObjectAddress, c_BroadCast,
+                SCHM_PrimitiveRegistration, Obj.I_ObjectAddress);
+            SchEditRegister(SchDoc, NewObj);
+            Obj := NewObj;
+        end
+        else
+        begin
+            SchEditBeginModify(Obj);
+            // Formatting validates itself before changing anything, so it goes
+            // first: a bad value leaves the object untouched.
+            if HasFormat then
+            begin
+                Err := SchEditApplyTextFormat(Obj, RequestData);
+                if Err <> '' then
+                begin
+                    SchEditEndModify(Obj);
+                    Result := Err;
+                    Exit;
+                end;
+            end;
+            if HasPoints then
+            begin
+                Obj.Location := Point(SchEditCoord(Coords, 0), SchEditCoord(Coords, 1));
+                Obj.Corner := Point(SchEditCoord(Coords, 2), SchEditCoord(Coords, 3));
+            end;
+            if HasX or HasY then
+            begin
+                if not HasX then NX := CoordToMils(Obj.Location.X);
+                if not HasY then NY := CoordToMils(Obj.Location.Y);
+                Obj.MoveToXY(MilsToCoord(NX), MilsToCoord(NY));
+            end;
+            if HasRot then
+                Obj.Orientation := SchEditRotationFromDeg(NRot);
+            if NewText <> '' then
+            begin
+                if Kind = 'port' then
+                    Obj.Name := NewText
+                else
+                    Obj.Text := NewText;
+            end;
+            if StyleName <> '' then
+                Obj.Style := Style;
+            if (Kind = 'power_port') and SchMcpHasKey(RequestData, 'new_show_net_name') then
+                Obj.ShowNetName := SchMcpGetBool(RequestData, 'new_show_net_name', True);
+            if Kind = 'port' then
+            begin
+                if HasW then
+                begin
+                    Obj.AutoSize := False;
+                    Obj.Width := MilsToCoord(NW);
+                end;
+                if IOName <> '' then
+                    Obj.IOType := IOType;
+            end;
+            SchEditEndModify(Obj);
+        end;
+
+        Props := TStringList.Create;
+        try
+            Props.Add('"object": ' + SchEditDescribe(Obj, Kind));
+            Result := BuildJSONObject(Props);
+        finally
+            Props.Free;
+        end;
+    finally
+        Coords.Free;
+        Pts.Free;
+        Txts.Free;
+        Ys.Free;
+        Xs.Free;
+        Kinds.Free;
+    end;
+end;
+
+{..............................................................................}
 { create_sheet: a NEW blank sheet, optionally formatted like another sheet.    }
 { The only action that writes a file, and it never overwrites one.             }
 {..............................................................................}
@@ -1263,7 +1793,8 @@ begin
        (Action <> 'place_component') and (Action <> 'add_wire') and (Action <> 'add_bus') and
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and
        (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') and
-       (Action <> 'add_port') and (Action <> 'set_component_text') then
+       (Action <> 'add_port') and (Action <> 'set_component_text') and
+       (Action <> 'delete_objects') and (Action <> 'modify_object') then
     begin
         Result := 'ERROR: Unknown schematic_edit action: ' + Action;
         Exit;
@@ -1297,6 +1828,10 @@ begin
             Inner := SchEditAddJunction(SchDoc, RequestData)
         else if Action = 'add_port' then
             Inner := SchEditAddPort(SchDoc, RequestData)
+        else if Action = 'delete_objects' then
+            Inner := SchEditDeleteObjects(SchDoc, RequestData)
+        else if Action = 'modify_object' then
+            Inner := SchEditModifyObject(SchDoc, RequestData)
         else
             Inner := SchEditAddPointObject(SchDoc, RequestData, Action);
     finally

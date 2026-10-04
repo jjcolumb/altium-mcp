@@ -153,6 +153,8 @@ Edit an existing schematic sheet in place. Every tool takes an explicit `schemat
 - `sch_add_bus_entry`: Add a bus entry.
 - `sch_add_junction`: Add a junction, e.g. to connect two crossing wires.
 - `sch_add_port`: Add a sheet port (name, width, arrow style, I/O type).
+- `sch_modify_object`: Change an object already on the sheet (move, rotate, rename, restyle power ports and ports, redraw a wire, reformat a note). Objects are selected the way `get_schematic_objects` reports them and must match exactly one object.
+- `sch_delete_objects`: Delete parts, wires, labels, ports and other objects, all as one undo step; if any selector fails, nothing is deleted.
 - `sch_add_net_label` / `sch_add_power_port` / `sch_add_text`: Add a net label, power port (bar, arrow, circle, wave, ground styles) or free text (optional font, size, bold/italic/underline, color, justification).
 
 The DelphiScript for these tools is derived from [flaco-source/altium-mcp](https://github.com/flaco-source/altium-mcp) (MIT). See [NOTICE](NOTICE).

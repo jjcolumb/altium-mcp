@@ -43,6 +43,53 @@ def _points_to_csv(points: list) -> str:
     return ",".join(numbers)
 
 
+_SELECTOR_KINDS = ("component", "wire", "bus", "bus_entry", "junction", "net_label", "power_port",
+                   "port", "text", "off_sheet_connector", "no_erc")
+
+
+def _points_from(value) -> list:
+    """Accept [[x, y], ...] or read-back style [{"x": .., "y": ..}, ...]."""
+    if not isinstance(value, list):
+        raise ValueError("vertices must be a list of points")
+    return [[p["x"], p["y"]] if isinstance(p, dict) else p for p in value]
+
+
+def _selector(obj) -> tuple:
+    """Turn a selector (a get_schematic_objects entry plus "kind") into the
+    (kind, x, y, text, points) strings the Altium script matches on."""
+    if not isinstance(obj, dict):
+        raise ValueError(f"each object must be an object with a kind, got {obj!r}")
+    kind = str(obj.get("kind", "")).strip().lower()
+    if kind not in _SELECTOR_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(_SELECTOR_KINDS)}; got {obj.get('kind')!r}")
+    x = y = text = points = ""
+    if kind == "component":
+        text = str(obj.get("designator") or obj.get("text") or "")
+        if not text:
+            raise ValueError("a component selector needs its designator")
+    elif kind in ("wire", "bus"):
+        points = _points_to_csv(_points_from(obj.get("vertices")))
+    elif kind == "bus_entry":
+        if "vertices" in obj:
+            points = _points_to_csv(_points_from(obj["vertices"]))
+        else:
+            points = _points_to_csv([[obj["x1"], obj["y1"]], [obj["x2"], obj["y2"]]])
+    else:
+        if obj.get("x") is None or obj.get("y") is None:
+            raise ValueError(f"a {kind} selector needs x and y")
+        x, y = _format_number(obj["x"]), _format_number(obj["y"])
+        text = str(obj.get("text") or obj.get("net_name") or obj.get("name") or "")
+    return kind, x, y, text, points
+
+
+def _selector_arrays(objects: list) -> dict:
+    arrays = {k: [] for k in ("sel_kind", "sel_x", "sel_y", "sel_text", "sel_points")}
+    for obj in objects:
+        for key, value in zip(("sel_kind", "sel_x", "sel_y", "sel_text", "sel_points"), _selector(obj)):
+            arrays[key].append(value)
+    return arrays
+
+
 def register_schematic_tools(mcp, altium_bridge, logger):
     """Register the schematic read/edit tools on the server's FastMCP instance."""
 
@@ -458,6 +505,108 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             return json.dumps({"success": False, "error": f"Failed to read schematic: {error_msg}"})
 
         return json.dumps(analyze_connectivity(response.get("result", {})), indent=2)
+
+    @mcp.tool()
+    async def sch_delete_objects(ctx: Context, schematic_path: str, objects: list) -> str:
+        """
+        Delete objects from an existing schematic sheet, all as one undo step.
+
+        Each object is a selector: an entry copied from get_schematic_objects plus its
+        "kind". It must match exactly one object, otherwise NOTHING is deleted:
+        - {"kind": "wire" or "bus", "vertices": [...]}   (the exact vertex list)
+        - {"kind": "bus_entry", "x1":.., "y1":.., "x2":.., "y2":..}
+        - {"kind": "component", "designator": "R5"}      (removes the whole part)
+        - {"kind": "net_label" | "power_port" | "port" | "text" | "junction" |
+           "off_sheet_connector" | "no_erc", "x":.., "y":..}  plus "net_name" / "name" /
+          "text" when several objects share a location
+        Deleting a part does not delete its wires.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            objects (list): Selectors, as above
+
+        Returns:
+            str: JSON object listing what was deleted
+        """
+        if not isinstance(objects, list) or not objects:
+            return json.dumps({"success": False, "error": "objects must be a non-empty list"})
+        try:
+            arrays = _selector_arrays(objects)
+        except (ValueError, KeyError, TypeError) as e:
+            return json.dumps({"success": False, "error": f"bad selector: {e}"})
+        return await _schematic_edit("delete_objects", {"schematic_path": schematic_path, **arrays})
+
+    @mcp.tool()
+    async def sch_modify_object(ctx: Context, schematic_path: str, object: dict, changes: dict) -> str:
+        """
+        Change an object already on an existing schematic sheet (not a component; use
+        sch_move_component, sch_set_component_parameters or sch_set_component_text for those).
+
+        object is a selector, as in sch_delete_objects (a get_schematic_objects entry plus
+        "kind"); it must match exactly one object. changes may contain:
+        - x, y: move net labels, power ports, ports, text, junctions, off-sheet connectors,
+          No ERC markers
+        - rotation: net labels, power ports, text, off-sheet connectors (power ports:
+          90 up, 270 down, 0 right, 180 left)
+        - text (or net_name / name): new text for net labels, power ports, text, ports,
+          off-sheet connectors
+        - style: power port style (bar, arrow, circle, wave, gnd_power, gnd_signal,
+          gnd_earth) or port style (none, left, right, left_right, top, bottom, top_bottom)
+        - show_net_name: power ports
+        - width, io_type: ports
+        - vertices: new point list for a wire or bus (redraws it); x1, y1, x2, y2: bus entry
+        - font_name, font_size, bold, italic, underline, color ("#RRGGBB"), justification:
+          text only
+        Everything is checked before anything changes; unsupported changes are refused.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            object (dict): Selector for the object to change
+            changes (dict): Properties to change, as above
+
+        Returns:
+            str: JSON object describing the object after the change
+        """
+        if not isinstance(changes, dict) or not changes:
+            return json.dumps({"success": False, "error": "changes must be a non-empty object"})
+        allowed = {"x", "y", "rotation", "text", "net_name", "name", "style", "show_net_name", "width",
+                   "io_type", "vertices", "x1", "y1", "x2", "y2", "font_name", "font_size", "bold",
+                   "italic", "underline", "color", "justification"}
+        unknown = set(changes) - allowed
+        if unknown:
+            return json.dumps({"success": False, "error": f"unsupported changes: {sorted(unknown)}"})
+        try:
+            params = {"schematic_path": schematic_path, **_selector_arrays([object])}
+            for key in ("x", "y", "rotation", "width"):
+                if changes.get(key) is not None:
+                    params[f"new_{key}"] = changes[key]
+            new_text = changes.get("text") or changes.get("net_name") or changes.get("name")
+            if new_text:
+                params["new_text"] = str(new_text)
+            for key in ("style", "io_type"):
+                if changes.get(key):
+                    params[f"new_{key}"] = str(changes[key])
+            if changes.get("show_net_name") is not None:
+                params["new_show_net_name"] = bool(changes["show_net_name"])
+            if changes.get("vertices") is not None:
+                params["new_points"] = _points_to_csv(_points_from(changes["vertices"]))
+            if any(k in changes for k in ("x1", "y1", "x2", "y2")):
+                params["new_points"] = _points_to_csv([[changes["x1"], changes["y1"]],
+                                                       [changes["x2"], changes["y2"]]])
+            for key in ("font_name", "font_size", "bold", "italic", "underline", "color", "justification"):
+                if changes.get(key) is not None:
+                    params[key] = changes[key]
+        except (ValueError, KeyError, TypeError) as e:
+            return json.dumps({"success": False, "error": f"bad object or changes: {e}"})
+        return await _schematic_edit("modify_object", params)
 
     @mcp.tool()
     async def check_schematic_layout(ctx: Context, schematic_path: str) -> str:
