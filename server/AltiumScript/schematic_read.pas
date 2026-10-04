@@ -434,6 +434,31 @@ begin
     end;
 end;
 
+// TColor is $00BBGGRR; report it as #RRGGBB.
+function SchMcpColorHex(Color: Integer): String;
+begin
+    Result := '#' + IntToHex(Color and $FF, 2) + IntToHex((Color shr 8) and $FF, 2) +
+              IntToHex((Color shr 16) and $FF, 2);
+end;
+
+// A sheet font-table entry as {name, size, bold, italic, underline}.
+function SchMcpFontJSON(FontID: Integer): String;
+var
+    Props: TStringList;
+begin
+    Props := TStringList.Create;
+    try
+        AddJSONProperty(Props, 'name', SchServer.FontManager.FontName(FontID));
+        AddJSONInteger(Props, 'size', SchServer.FontManager.Size(FontID));
+        AddJSONBoolean(Props, 'bold', SchServer.FontManager.Bold(FontID));
+        AddJSONBoolean(Props, 'italic', SchServer.FontManager.Italic(FontID));
+        AddJSONBoolean(Props, 'underline', SchServer.FontManager.Underline(FontID));
+        Result := BuildJSONObject(Props, 2);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Placement of one component text (designator or parameter).
 function SchMcpTextPlacementJSON(Txt: ISch_GraphicalObject): String;
 var
@@ -594,6 +619,9 @@ begin
             AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
+            AddJSONProperty(Props, 'justification', SchMcpJustificationName(Obj.Justification));
+            AddJSONProperty(Props, 'color', SchMcpColorHex(Obj.Color));
+            Props.Add('"font": ' + SchMcpFontJSON(Obj.FontID));
             Labels.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = eCrossSheetConnector then

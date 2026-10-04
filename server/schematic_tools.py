@@ -524,9 +524,16 @@ def register_schematic_tools(mcp, altium_bridge, logger):
 
     @mcp.tool()
     async def sch_add_text(ctx: Context, schematic_path: str, text: str, x: float, y: float,
-                           rotation: float = 0) -> str:
+                           rotation: float = 0, font_name: str = "", font_size: float = 0,
+                           bold: Optional[bool] = None, italic: Optional[bool] = None,
+                           underline: Optional[bool] = None, color: str = "",
+                           justification: str = "") -> str:
         """
         Add a free text label (a note, not a net label) on an existing schematic sheet.
+
+        Formatting is optional; anything left out uses Altium's default for new text.
+        get_schematic_objects reports the font, color and justification of existing
+        notes, so a note can be made to match them.
 
         This does NOT save the schematic. After the edit, call get_schematic_objects on the
         same sheet and confirm the change before relying on it. If the edit fails, stop and
@@ -538,14 +545,28 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             x (float): X in mils
             y (float): Y in mils
             rotation (float): Rotation in degrees (0, 90, 180, 270)
+            font_name (str): Font family, e.g. "Arial" (optional)
+            font_size (float): Font size in points (optional)
+            bold (bool): Bold (optional)
+            italic (bool): Italic (optional)
+            underline (bool): Underline (optional)
+            color (str): Text color as "#RRGGBB" (optional)
+            justification (str): bottom_left, bottom_center, bottom_right, center_left, center,
+                center_right, top_left, top_center or top_right (optional)
 
         Returns:
-            str: JSON object with the new text label
+            str: JSON object with the new text label and its formatting
         """
-        return await _schematic_edit("add_text", {
-            "schematic_path": schematic_path,
-            "text": text,
-            "x": x,
-            "y": y,
-            "rotation": rotation,
-        })
+        params = {"schematic_path": schematic_path, "text": text, "x": x, "y": y, "rotation": rotation}
+        if font_name:
+            params["font_name"] = font_name
+        if font_size:
+            params["font_size"] = font_size
+        for key, value in (("bold", bold), ("italic", italic), ("underline", underline)):
+            if value is not None:
+                params[key] = value
+        if color:
+            params["color"] = color
+        if justification:
+            params["justification"] = justification
+        return await _schematic_edit("add_text", params)

@@ -814,6 +814,73 @@ begin
     end;
 end;
 
+// '#RRGGBB' -> TColor ($00BBGGRR). Returns False if malformed.
+function SchEditParseColor(S: String; var Color: Integer): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    S := Trim(S);
+    if (Length(S) <> 7) or (S[1] <> '#') then
+        Exit;
+    for i := 2 to 7 do
+        if not SchMcpIsHexDigit(S[i]) then
+            Exit;
+    Color := StrToInt('$' + Copy(S, 2, 2)) + StrToInt('$' + Copy(S, 4, 2)) * 256 +
+             StrToInt('$' + Copy(S, 6, 2)) * 65536;
+    Result := True;
+end;
+
+// Optional text formatting for add_text: font_name, font_size, bold, italic,
+// underline, color, justification. Missing values keep Obj's current ones.
+// Returns '' or an 'ERROR: ...' (checked before the object is registered).
+function SchEditApplyTextFormat(Obj: ISch_GraphicalObject; RequestData: TStringList): String;
+var
+    FontName: String;
+    Size: Double;
+    HasSize, ValidSize: Boolean;
+    Bold, Italic, Underline: Boolean;
+    Color, Just: Integer;
+begin
+    Result := '';
+    FontName := SchMcpGetString(RequestData, 'font_name');
+    Size := SchMcpGetFloat(RequestData, 'font_size', HasSize, ValidSize);
+    if not ValidSize or (HasSize and ((Size < 1) or (Size > 200))) then
+    begin
+        Result := 'ERROR: font_size must be a number from 1 to 200';
+        Exit;
+    end;
+    if SchMcpHasKey(RequestData, 'color') then
+        if not SchEditParseColor(SchMcpGetString(RequestData, 'color'), Color) then
+        begin
+            Result := 'ERROR: color must be "#RRGGBB"';
+            Exit;
+        end;
+    if SchMcpHasKey(RequestData, 'justification') then
+        if not SchEditParseJustification(SchMcpGetString(RequestData, 'justification'), Just) then
+        begin
+            Result := 'ERROR: unknown justification "' + SchMcpGetString(RequestData, 'justification') + '"';
+            Exit;
+        end;
+
+    if (FontName <> '') or HasSize or SchMcpHasKey(RequestData, 'bold') or
+       SchMcpHasKey(RequestData, 'italic') or SchMcpHasKey(RequestData, 'underline') then
+    begin
+        if FontName = '' then FontName := SchServer.FontManager.FontName(Obj.FontID);
+        if not HasSize then Size := SchServer.FontManager.Size(Obj.FontID);
+        Bold := SchMcpGetBool(RequestData, 'bold', SchServer.FontManager.Bold(Obj.FontID));
+        Italic := SchMcpGetBool(RequestData, 'italic', SchServer.FontManager.Italic(Obj.FontID));
+        Underline := SchMcpGetBool(RequestData, 'underline', SchServer.FontManager.Underline(Obj.FontID));
+        // GetFontID(Size, Rotation, Underline, Italic, Bold, StrikeOut, Name),
+        // order verified in Altium.
+        Obj.FontID := SchServer.FontManager.GetFontID(Round(Size), 0, Underline, Italic, Bold, False, FontName);
+    end;
+    if SchMcpHasKey(RequestData, 'color') then
+        Obj.Color := Color;
+    if SchMcpHasKey(RequestData, 'justification') then
+        Obj.Justification := Just;
+end;
+
 // Net labels, power ports and text labels: a point object with text.
 function SchEditAddPointObject(SchDoc: ISch_Document; RequestData: TStringList; Action: String): String;
 var
@@ -887,6 +954,12 @@ begin
         Obj.Style := Style;
         Obj.ShowNetName := SchMcpGetBool(RequestData, 'show_net_name', True);
     end;
+    if Action = 'add_text' then
+    begin
+        Result := SchEditApplyTextFormat(Obj, RequestData);
+        if Result <> '' then
+            Exit;
+    end;
     SchEditRegister(SchDoc, Obj);
 
     Props := TStringList.Create;
@@ -897,6 +970,12 @@ begin
         AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
         AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
         AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
+        if Action = 'add_text' then
+        begin
+            AddJSONProperty(Props, 'justification', SchMcpJustificationName(Obj.Justification));
+            AddJSONProperty(Props, 'color', SchMcpColorHex(Obj.Color));
+            Props.Add('"font": ' + SchMcpFontJSON(Obj.FontID));
+        end;
         Result := BuildJSONObject(Props);
     finally
         Props.Free;
