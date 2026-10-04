@@ -416,15 +416,53 @@ begin
     end;
 end;
 
+// TTextJustification order: bottom row, center row, top row; left to right.
+function SchMcpJustificationName(Just: Integer): String;
+begin
+    case Just of
+        0: Result := 'bottom_left';
+        1: Result := 'bottom_center';
+        2: Result := 'bottom_right';
+        3: Result := 'center_left';
+        4: Result := 'center';
+        5: Result := 'center_right';
+        6: Result := 'top_left';
+        7: Result := 'top_center';
+        8: Result := 'top_right';
+    else
+        Result := IntToStr(Just);
+    end;
+end;
+
+// Placement of one component text (designator or parameter).
+function SchMcpTextPlacementJSON(Txt: ISch_GraphicalObject): String;
+var
+    Props: TStringList;
+begin
+    Props := TStringList.Create;
+    try
+        AddJSONNumber(Props, 'x', CoordToMils(Txt.Location.X));
+        AddJSONNumber(Props, 'y', CoordToMils(Txt.Location.Y));
+        AddJSONBoolean(Props, 'visible', not Txt.IsHidden);
+        AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Txt.Orientation));
+        AddJSONProperty(Props, 'justification', SchMcpJustificationName(Txt.Justification));
+        Result := BuildJSONObject(Props, 2);
+    finally
+        Props.Free;
+    end;
+end;
+
 function SchMcpComponentJSON(Comp: ISch_Component): String;
 var
-    Props, ParamProps: TStringList;
+    Props, ParamProps, TextProps: TStringList;
     Iter: ISch_Iterator;
     Param: ISch_Parameter;
 begin
     Props := TStringList.Create;
     ParamProps := TStringList.Create;
+    TextProps := TStringList.Create;
     try
+        TextProps.Add('"Designator": ' + SchMcpTextPlacementJSON(Comp.Designator));
         AddJSONProperty(Props, 'designator', Comp.Designator.Text);
         AddJSONProperty(Props, 'lib_reference', Comp.LibReference);
         AddJSONNumber(Props, 'x', CoordToMils(Comp.Location.X));
@@ -439,14 +477,17 @@ begin
         while Param <> nil do
         begin
             AddJSONProperty(ParamProps, Param.Name, Param.Text);
+            TextProps.Add('"' + JSONEscapeString(Param.Name) + '": ' + SchMcpTextPlacementJSON(Param));
             Param := Iter.NextSchObject;
         end;
         Comp.SchIterator_Destroy(Iter);
         Props.Add('"parameters": ' + BuildJSONObject(ParamProps, 1));
+        Props.Add('"text": ' + BuildJSONObject(TextProps, 1));
         Props.Add('"pins": ' + SchMcpPinsJSON(Comp));
 
         Result := BuildJSONObject(Props, 1);
     finally
+        TextProps.Free;
         ParamProps.Free;
         Props.Free;
     end;

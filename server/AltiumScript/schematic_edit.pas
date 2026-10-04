@@ -2,7 +2,8 @@
 { schematic_edit.pas                                                           }
 {                                                                              }
 { The schematic_edit command: one edit action on an EXISTING schematic sheet.  }
-{ Actions: move_component, set_component_parameters, place_component,         }
+{ Actions: move_component, set_component_parameters, set_component_text,      }
+{ place_component,                                                             }
 { add_wire, add_bus, add_bus_entry, add_junction, add_net_label,              }
 { add_power_port, add_port, add_text, and create_sheet (a new file).          }
 {                                                                              }
@@ -316,6 +317,171 @@ begin
         Created.Free;
         Updated.Free;
         Values.Free;
+        Names.Free;
+    end;
+end;
+
+function SchEditParseJustification(S: String; var Just: Integer): Boolean;
+begin
+    Result := True;
+    S := LowerCase(Trim(S));
+    if S = 'bottom_left' then Just := 0
+    else if S = 'bottom_center' then Just := 1
+    else if S = 'bottom_right' then Just := 2
+    else if S = 'center_left' then Just := 3
+    else if S = 'center' then Just := 4
+    else if S = 'center_right' then Just := 5
+    else if S = 'top_left' then Just := 6
+    else if S = 'top_center' then Just := 7
+    else if S = 'top_right' then Just := 8
+    else Result := False;
+end;
+
+// Place component texts: the designator ("Designator") or any parameter by
+// name. Parallel arrays, one entry per text; '' leaves that property alone.
+// Everything is validated before anything changes.
+function SchEditSetComponentText(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    Designator: String;
+    Comp: ISch_Component;
+    Names, Xs, Ys, Visibles, Rots, Justs, Done, Props: TStringList;
+    Iter: ISch_Iterator;
+    Param: ISch_Parameter;
+    Txt: ISch_GraphicalObject;
+    i, Just: Integer;
+    NewX, NewY: Integer;
+begin
+    Designator := SchMcpGetString(RequestData, 'designator');
+    if Designator = '' then
+    begin
+        Result := 'ERROR: designator is required';
+        Exit;
+    end;
+
+    Names := TStringList.Create;
+    Xs := TStringList.Create;
+    Ys := TStringList.Create;
+    Visibles := TStringList.Create;
+    Rots := TStringList.Create;
+    Justs := TStringList.Create;
+    Done := TStringList.Create;
+    try
+        SchMcpGetStringArray(RequestData, 'text_names', Names);
+        SchMcpGetStringArray(RequestData, 'text_x', Xs);
+        SchMcpGetStringArray(RequestData, 'text_y', Ys);
+        SchMcpGetStringArray(RequestData, 'text_visible', Visibles);
+        SchMcpGetStringArray(RequestData, 'text_rotation', Rots);
+        SchMcpGetStringArray(RequestData, 'text_justification', Justs);
+        if (Names.Count = 0) or (Xs.Count <> Names.Count) or (Ys.Count <> Names.Count) or
+           (Visibles.Count <> Names.Count) or (Rots.Count <> Names.Count) or (Justs.Count <> Names.Count) then
+        begin
+            Result := 'ERROR: text arrays must be non-empty and the same length';
+            Exit;
+        end;
+
+        Comp := SchEditFindComponent(SchDoc, Designator);
+        if Comp = nil then
+        begin
+            Result := 'ERROR: Component not found on sheet: ' + Designator;
+            Exit;
+        end;
+
+        // Validate every entry first.
+        for i := 0 to Names.Count - 1 do
+        begin
+            if ((Xs[i] <> '') and not SchMcpIsNumber(Xs[i])) or ((Ys[i] <> '') and not SchMcpIsNumber(Ys[i])) or
+               ((Rots[i] <> '') and not SchMcpIsNumber(Rots[i])) then
+            begin
+                Result := 'ERROR: x, y and rotation must be numbers (text "' + Names[i] + '")';
+                Exit;
+            end;
+            if (Justs[i] <> '') and not SchEditParseJustification(Justs[i], Just) then
+            begin
+                Result := 'ERROR: unknown justification "' + Justs[i] + '"';
+                Exit;
+            end;
+            if UpperCase(Names[i]) <> 'DESIGNATOR' then
+            begin
+                Txt := nil;
+                Iter := Comp.SchIterator_Create;
+                Iter.AddFilter_ObjectSet(MkSet(eParameter));
+                Param := Iter.FirstSchObject;
+                while Param <> nil do
+                begin
+                    if UpperCase(Param.Name) = UpperCase(Names[i]) then
+                        Txt := Param;
+                    Param := Iter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(Iter);
+                if Txt = nil then
+                begin
+                    Result := 'ERROR: ' + Designator + ' has no parameter "' + Names[i] + '"';
+                    Exit;
+                end;
+            end;
+        end;
+
+        for i := 0 to Names.Count - 1 do
+        begin
+            if UpperCase(Names[i]) = 'DESIGNATOR' then
+                Txt := Comp.Designator
+            else
+            begin
+                Txt := nil;
+                Iter := Comp.SchIterator_Create;
+                Iter.AddFilter_ObjectSet(MkSet(eParameter));
+                Param := Iter.FirstSchObject;
+                while Param <> nil do
+                begin
+                    if UpperCase(Param.Name) = UpperCase(Names[i]) then
+                        Txt := Param;
+                    Param := Iter.NextSchObject;
+                end;
+                Comp.SchIterator_Destroy(Iter);
+            end;
+
+            SchEditBeginModify(Txt);
+            if (Xs[i] <> '') or (Ys[i] <> '') then
+            begin
+                NewX := Txt.Location.X;
+                NewY := Txt.Location.Y;
+                if Xs[i] <> '' then NewX := MilsToCoord(SafeStrToFloat(Xs[i]));
+                if Ys[i] <> '' then NewY := MilsToCoord(SafeStrToFloat(Ys[i]));
+                Txt.Autoposition := False;
+                Txt.MoveToXY(NewX, NewY);
+            end;
+            if Rots[i] <> '' then
+            begin
+                Txt.Autoposition := False;
+                Txt.Orientation := SchEditRotationFromDeg(SafeStrToFloat(Rots[i]));
+            end;
+            if Justs[i] <> '' then
+            begin
+                SchEditParseJustification(Justs[i], Just);
+                Txt.Autoposition := False;
+                Txt.Justification := Just;
+            end;
+            if Visibles[i] <> '' then
+                Txt.IsHidden := not ((LowerCase(Visibles[i]) = 'true') or (Visibles[i] = '1'));
+            SchEditEndModify(Txt);
+            Done.Add('"' + JSONEscapeString(Names[i]) + '": ' + SchMcpTextPlacementJSON(Txt));
+        end;
+
+        Props := TStringList.Create;
+        try
+            AddJSONProperty(Props, 'designator', Comp.Designator.Text);
+            Props.Add('"text": ' + BuildJSONObject(Done, 1));
+            Result := BuildJSONObject(Props);
+        finally
+            Props.Free;
+        end;
+    finally
+        Done.Free;
+        Justs.Free;
+        Rots.Free;
+        Visibles.Free;
+        Ys.Free;
+        Xs.Free;
         Names.Free;
     end;
 end;
@@ -1006,7 +1172,7 @@ begin
        (Action <> 'place_component') and (Action <> 'add_wire') and (Action <> 'add_bus') and
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and
        (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') and
-       (Action <> 'add_port') then
+       (Action <> 'add_port') and (Action <> 'set_component_text') then
     begin
         Result := 'ERROR: Unknown schematic_edit action: ' + Action;
         Exit;
@@ -1026,6 +1192,8 @@ begin
             Inner := SchEditMoveComponent(SchDoc, RequestData)
         else if Action = 'set_component_parameters' then
             Inner := SchEditSetParameters(SchDoc, RequestData)
+        else if Action = 'set_component_text' then
+            Inner := SchEditSetComponentText(SchDoc, RequestData)
         else if Action = 'place_component' then
             Inner := SchEditPlaceComponent(SchDoc, RequestData)
         else if Action = 'add_wire' then

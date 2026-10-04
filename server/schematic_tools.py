@@ -195,6 +195,61 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         })
 
     @mcp.tool()
+    async def sch_set_component_text(ctx: Context, schematic_path: str, cmp_designator: str,
+                                     texts: list) -> str:
+        """
+        Position, rotate, justify, show or hide a component's designator and parameter texts.
+
+        Use it to tidy labels after placing or moving parts so they do not overlap wires or
+        other parts. get_schematic_objects returns each component's current "text" placement.
+        Positions are absolute sheet coordinates in mils; moved texts stop auto-positioning.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            cmp_designator (str): Designator of the component (e.g. "R1")
+            texts (list): One object per text, e.g.
+                [{"name": "Designator", "x": 4300, "y": 2600},
+                 {"name": "Comment", "x": 4300, "y": 2500, "visible": true, "justification": "bottom_left"},
+                 {"name": "Value", "visible": false}]
+                "name" is "Designator" or a parameter name. Optional keys: x, y, visible,
+                rotation (0/90/180/270), justification (bottom_left, bottom_center,
+                bottom_right, center_left, center, center_right, top_left, top_center,
+                top_right). Omitted keys are left unchanged.
+
+        Returns:
+            str: JSON object with the resulting placement of each text
+        """
+        if not isinstance(texts, list) or not texts:
+            return json.dumps({"success": False, "error": "texts must be a non-empty list"})
+        arrays = {k: [] for k in ("text_names", "text_x", "text_y", "text_visible",
+                                  "text_rotation", "text_justification")}
+        for item in texts:
+            if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+                return json.dumps({"success": False, "error": f"each text needs a name, got {item!r}"})
+            unknown = set(item) - {"name", "x", "y", "visible", "rotation", "justification"}
+            if unknown:
+                return json.dumps({"success": False, "error": f"unknown keys {sorted(unknown)} in {item!r}"})
+            try:
+                arrays["text_x"].append(_format_number(item["x"]) if item.get("x") is not None else "")
+                arrays["text_y"].append(_format_number(item["y"]) if item.get("y") is not None else "")
+                arrays["text_rotation"].append(_format_number(item["rotation"]) if item.get("rotation") is not None else "")
+            except (TypeError, ValueError):
+                return json.dumps({"success": False, "error": f"x, y and rotation must be numbers in {item!r}"})
+            arrays["text_names"].append(str(item["name"]))
+            visible = item.get("visible")
+            arrays["text_visible"].append("" if visible is None else ("true" if visible else "false"))
+            arrays["text_justification"].append(str(item.get("justification") or ""))
+        return await _schematic_edit("set_component_text", {
+            "schematic_path": schematic_path,
+            "designator": cmp_designator,
+            **arrays,
+        })
+
+    @mcp.tool()
     async def sch_place_component(ctx: Context, schematic_path: str, library_path: str, lib_reference: str,
                                   designator: str, x: float, y: float, rotation: float = 0) -> str:
         """
