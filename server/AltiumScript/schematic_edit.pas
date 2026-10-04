@@ -3,7 +3,8 @@
 {                                                                              }
 { The schematic_edit command: one edit action on an EXISTING schematic sheet.  }
 { Actions: move_component, set_component_parameters, place_component,         }
-{ add_wire, add_bus, add_bus_entry, add_net_label, add_power_port, add_text.   }
+{ add_wire, add_bus, add_bus_entry, add_junction, add_net_label,              }
+{ add_power_port, add_text.                                                    }
 {                                                                              }
 { Every edit is wrapped in PreProcess/PostProcess (one undo step), new objects }
 { are registered with the robot manager, and modified objects are bracketed by }
@@ -513,6 +514,47 @@ begin
     end;
 end;
 
+// Junction dot. Wires that merely cross are NOT connected unless a junction
+// sits on the crossing.
+function SchEditAddJunction(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    X, Y: Double;
+    HasX, HasY, ValidX, ValidY: Boolean;
+    Obj: ISch_Junction;
+    Props: TStringList;
+begin
+    X := SchMcpGetFloat(RequestData, 'x', HasX, ValidX);
+    Y := SchMcpGetFloat(RequestData, 'y', HasY, ValidY);
+    if not (HasX and HasY) then
+    begin
+        Result := 'ERROR: x and y are required';
+        Exit;
+    end;
+    if not (ValidX and ValidY) then
+    begin
+        Result := 'ERROR: x and y must be numbers';
+        Exit;
+    end;
+
+    Obj := SchServer.SchObjectFactory(eJunction, eCreate_GlobalCopy);
+    if Obj = nil then
+    begin
+        Result := 'ERROR: Could not create junction';
+        Exit;
+    end;
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    SchEditRegister(SchDoc, Obj);
+
+    Props := TStringList.Create;
+    try
+        AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+        AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Net labels, power ports and text labels: a point object with text.
 function SchEditAddPointObject(SchDoc: ISch_Document; RequestData: TStringList; Action: String): String;
 var
@@ -616,7 +658,7 @@ begin
     if (Action <> 'move_component') and (Action <> 'set_component_parameters') and
        (Action <> 'place_component') and (Action <> 'add_wire') and (Action <> 'add_bus') and
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and
-       (Action <> 'add_power_port') and (Action <> 'add_text') then
+       (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') then
     begin
         Result := 'ERROR: Unknown schematic_edit action: ' + Action;
         Exit;
@@ -644,6 +686,8 @@ begin
             Inner := SchEditAddPolyline(SchDoc, RequestData, True)
         else if Action = 'add_bus_entry' then
             Inner := SchEditAddBusEntry(SchDoc, RequestData)
+        else if Action = 'add_junction' then
+            Inner := SchEditAddJunction(SchDoc, RequestData)
         else
             Inner := SchEditAddPointObject(SchDoc, RequestData, Action);
     finally
