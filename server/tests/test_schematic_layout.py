@@ -75,6 +75,18 @@ class TestLayout(unittest.TestCase):
         self.assertIn("text_over_body", types(r))     # R1 Comment over R2's body
         self.assertIn("text_over_wire", types(r))     # wire through R1 Designator
 
+    def test_text_across_a_pin_line(self):
+        # U1's VCC pin runs from the body top (1500, 2000) up to (1500, 2200); the comment crosses it.
+        u1 = part("U1", [1000, 1000, 2000, 2000], {"Comment": [1300, 2050, 1700, 2150]})
+        u1["pins"] = [{"number": "4", "x": 1500, "y": 2200, "body_x": 1500, "body_y": 2000}]
+        r = analyze_layout(sheet(components=[u1]))
+        self.assertEqual([(i["type"], i["pin"]) for i in r["issues"]], [("text_over_pin", "U1.4")])
+
+    def test_text_beside_a_pin_line_is_fine(self):
+        u1 = part("U1", [1000, 1000, 2000, 2000], {"Comment": [1000, 2050, 1456, 2150]})
+        u1["pins"] = [{"number": "4", "x": 1500, "y": 2200, "body_x": 1500, "body_y": 2000}]
+        self.assertEqual(analyze_layout(sheet(components=[u1]))["issues"], [])
+
     def test_own_designator_inside_body_is_fine(self):
         s = sheet(components=[part("U1", [1000, 1000, 2000, 2000], {"Designator": [1400, 1500, 1500, 1600]})])
         self.assertEqual(analyze_layout(s)["issues"], [])

@@ -402,6 +402,9 @@ begin
                     AddJSONProperty(Props, 'name', Pin.Name);
                     AddJSONNumber(Props, 'x', HotX);
                     AddJSONNumber(Props, 'y', HotY);
+                    // Body end of the pin line (the hot end is x, y).
+                    AddJSONNumber(Props, 'body_x', CoordToMils(Pin.Location.X));
+                    AddJSONNumber(Props, 'body_y', CoordToMils(Pin.Location.Y));
                     Items.Add(BuildJSONObject(Props, 2));
                 finally
                     Props.Free;

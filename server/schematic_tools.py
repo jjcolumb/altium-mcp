@@ -471,6 +471,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         - text_overlap, text_over_wire, text_over_body (warnings): a designator, parameter,
           note, net label, power port or port collides with other text, a wire, or another
           part (a part's own designator inside its body is fine)
+        - text_over_pin (warning): a designator, parameter or note runs across a pin line
         - wire_overlap (warning): two wires drawn on top of each other
         - off_sheet, in_title_block (warnings)
         - off_grid (warning): a pin, wire vertex, port or label off the snap grid
@@ -534,8 +535,9 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         Add a power port (VCC, GND, 3V3, ...) on an existing schematic sheet.
 
         The port connects at its location, so place it on a wire end or pin connection
-        point. Rotation 0 points the symbol up (typical for supplies); 270 points it down
-        (typical for ground).
+        point. Rotation sets the direction the symbol points away from that point:
+        90 = up (typical for supplies), 270 = down (typical for ground), 0 = right,
+        180 = left.
 
         This does NOT save the schematic. After the edit, call get_schematic_objects on the
         same sheet and confirm the change before relying on it. If the edit fails, stop and
@@ -548,7 +550,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             y (float): Y in mils
             style (str): One of "bar", "arrow", "circle", "wave", "gnd_power", "gnd_signal",
                 "gnd_earth". Empty picks "gnd_power" for nets containing GND, otherwise "bar".
-            rotation (float): Rotation in degrees (0, 90, 180, 270)
+            rotation (float): Direction in degrees: 90 up, 270 down, 0 right, 180 left
             show_net_name (bool): Show the net name next to the symbol
 
         Returns:

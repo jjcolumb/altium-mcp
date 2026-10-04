@@ -119,6 +119,13 @@ def analyze_layout(sheet: dict) -> dict:
         if p.get("bbox"):
             texts.append((f'port "{p["name"]}"', p["bbox"], None, "port"))
 
+    # Pin lines, from the body end to the connection point; text must not cross them.
+    pin_lines = []  # (designator.number, body end, hot end)
+    for c in sheet.get("components", []):
+        for p in c.get("pins", []):
+            if "body_x" in p and (p["body_x"], p["body_y"]) != (p["x"], p["y"]):
+                pin_lines.append((f'{c["designator"]}.{p["number"]}', (p["body_x"], p["body_y"]), (p["x"], p["y"])))
+
     segments = []  # (wire index, p, q)
     for i, w in enumerate(sheet.get("wires", [])):
         pts = [(v["x"], v["y"]) for v in w.get("vertices", [])]
@@ -154,6 +161,14 @@ def analyze_layout(sheet: dict) -> dict:
         for wi, a, b in segments:
             if _segment_in_box(a, b, inner) > 0:
                 issue("text_over_wire", "warning", f"A wire runs through {name}", inner, object=name)
+                break
+    for name, box, owner, kind in texts:
+        if kind not in ("component_text", "note"):
+            continue
+        inner = _shrink(box, TEXT_TOL)
+        for pin, a, b in pin_lines:
+            if _segment_in_box(a, b, inner) > 0:
+                issue("text_over_pin", "warning", f"{name} runs across pin {pin}", inner, object=name, pin=pin)
                 break
     for name, box, owner, kind in texts:
         for des, body in bodies:
