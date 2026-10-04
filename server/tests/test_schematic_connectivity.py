@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from schematic_connectivity import analyze_connectivity
+from schematic_connectivity import analyze_connectivity, analyze_project
 
 
 def wire(*points):
@@ -131,6 +131,39 @@ class TestConnectivity(unittest.TestCase):
                   net_labels=[{"net_name": "SDA", "x": 500, "y": 0}, {"net_name": "SDA", "x": 1900, "y": 0}])
         r = analyze_connectivity(s)
         self.assertIn({"name": "SDA", "pins": ["R1.2", "R2.1"]}, r["nets"])
+
+
+class TestProject(unittest.TestCase):
+    """Flat multi-sheet designs: ports and power ports join sheets, net labels do not."""
+
+    def two_sheets(self, a_extra, b_extra):
+        a = {"sheet": "A", **sheet(components=[resistor("R1", 0, 0, 400, 0)], wires=[wire((400, 0), (800, 0))],
+                                   power_ports=[{"net_name": "GND", "x": 0, "y": 0}]), **a_extra}
+        b = {"sheet": "B", **sheet(components=[resistor("R2", 1000, 0, 1400, 0)], wires=[wire((600, 0), (1000, 0))],
+                                   power_ports=[{"net_name": "GND", "x": 1400, "y": 0}]), **b_extra}
+        return analyze_project([a, b])
+
+    def test_port_joins_sheets(self):
+        r = self.two_sheets({"ports": [{"name": "SIG", "x": 800, "y": 0}]},
+                            {"ports": [{"name": "SIG", "x": 600, "y": 0}]})
+        self.assertIn({"name": "SIG", "pins": ["R1.2", "R2.1"], "sheets": ["A", "B"]}, r["nets"])
+        self.assertIn({"name": "GND", "pins": ["R1.1", "R2.2"], "sheets": ["A", "B"]}, r["nets"])
+        self.assertEqual([i for i in r["issues"] if i["severity"] != "info"], [])
+
+    def test_net_label_does_not_join_sheets(self):
+        r = self.two_sheets({"net_labels": [{"net_name": "SIG", "x": 600, "y": 0}]},
+                            {"net_labels": [{"net_name": "SIG", "x": 800, "y": 0}]})
+        sig = [n for n in r["nets"] if n["name"] == "SIG"]
+        self.assertEqual(len(sig), 2)   # one per sheet, not merged
+
+    def test_unmatched_port(self):
+        r = self.two_sheets({"ports": [{"name": "SIG", "x": 800, "y": 0}]}, {})
+        self.assertIn("port_unmatched", [i["type"] for i in r["issues"]])
+
+    def test_designator_on_two_sheets(self):
+        a = {"sheet": "A", **sheet(components=[resistor("R1", 0, 0, 400, 0)])}
+        b = {"sheet": "B", **sheet(components=[resistor("R1", 0, 0, 400, 0)])}
+        self.assertIn("designator_on_several_sheets", [i["type"] for i in analyze_project([a, b])["issues"]])
 
 
 if __name__ == "__main__":

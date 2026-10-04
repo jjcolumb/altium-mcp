@@ -16,7 +16,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import Context
 
-from schematic_connectivity import analyze_connectivity
+from schematic_connectivity import analyze_connectivity, analyze_project
 from schematic_layout import analyze_layout
 
 
@@ -142,7 +142,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
 
     @mcp.tool()
     async def sch_create_sheet(ctx: Context, schematic_path: str, copy_format_from: str = "",
-                               title_block_region: Optional[list] = None) -> str:
+                               title_block_region: Optional[list] = None, sheet_size: str = "") -> str:
         """
         Create a NEW blank schematic sheet file, optionally formatted like an existing sheet.
 
@@ -158,16 +158,24 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         strings, which stay live. The title block is found automatically as the drawing
         graphics in the bottom-right quarter of the sheet, or given explicitly.
 
+        sheet_size overrides the size: a standard size (A4, A3, A2, A1, A0, A, B, C, D, E,
+        Letter, Legal, Tabloid; C is 20000 x 15000 mils) or a custom "WIDTHxHEIGHT" in mils,
+        e.g. "17000x11000". A copied title block is moved so it stays in the bottom-right
+        corner of the new size.
+
         Args:
             schematic_path (str): Full path for the new .SchDoc (must not exist yet)
             copy_format_from (str): Optional full path of a .SchDoc to copy the format from
             title_block_region (list): Optional [x1, y1, x2, y2] in mils on the format sheet;
                 everything fully inside is copied. Default: auto-detect.
+            sheet_size (str): Optional sheet size, as above
 
         Returns:
             str: JSON object describing what was created and copied
         """
         params = {"schematic_path": schematic_path, "copy_format_from": copy_format_from}
+        if sheet_size:
+            params["sheet_size"] = sheet_size
         if title_block_region is not None:
             if not isinstance(title_block_region, list) or len(title_block_region) != 4:
                 return json.dumps({"success": False, "error": "title_block_region must be [x1, y1, x2, y2]"})
@@ -609,6 +617,39 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         return await _schematic_edit("modify_object", params)
 
     @mcp.tool()
+    async def check_project_connectivity(ctx: Context, schematic_paths: list) -> str:
+        """
+        Check the wiring of a FLAT multi-sheet design and list its nets across sheets. Read-only.
+
+        Use this instead of check_schematic_connectivity when a design spans several sheets.
+        Nets on different sheets join when they share a power port, port or off-sheet
+        connector name; net labels only name nets on their own sheet (Altium's flat /
+        automatic scope with no sheet symbols). Reports every per-sheet issue (with its
+        sheet), plus ports that appear on only one sheet (port_unmatched), designators
+        placed on several sheets, and nets carrying several names. Returns every net with
+        its pins and the sheets it spans, and every unconnected pin (No ERC-marked pins
+        are not counted).
+
+        Args:
+            schematic_paths (list): Full paths of all .SchDoc sheets of the design
+
+        Returns:
+            str: JSON object with summary, issues, nets and unconnected_pins
+        """
+        if not isinstance(schematic_paths, list) or not schematic_paths:
+            return json.dumps({"success": False, "error": "schematic_paths must be a non-empty list"})
+        logger.info(f"Checking project connectivity for {len(schematic_paths)} sheets")
+        sheets = []
+        for path in schematic_paths:
+            response = await altium_bridge.execute_command("get_schematic_objects", {"schematic_path": path})
+            if not response.get("success", False):
+                error_msg = response.get("error", "Unknown error")
+                logger.error(f"Error reading {path} for project check: {error_msg}")
+                return json.dumps({"success": False, "error": f"Failed to read {path}: {error_msg}"})
+            sheets.append(response.get("result", {}))
+        return json.dumps(analyze_project(sheets), indent=2)
+
+    @mcp.tool()
     async def check_schematic_layout(ctx: Context, schematic_path: str) -> str:
         """
         Check the readability of ONE schematic sheet's layout. Read-only.
@@ -646,6 +687,29 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             return json.dumps({"success": False, "error": f"Failed to read schematic: {error_msg}"})
 
         return json.dumps(analyze_layout(response.get("result", {})), indent=2)
+
+    @mcp.tool()
+    async def sch_add_no_erc(ctx: Context, schematic_path: str, x: float, y: float) -> str:
+        """
+        Add a No ERC marker (the small cross) on an existing schematic sheet.
+
+        Put one on the connection point of every pin that is intentionally left
+        unconnected (unused MCU pins, NC pins), so it is not reported as an error;
+        check_schematic_connectivity then leaves that pin out of unconnected_pins.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            x (float): X in mils (a pin connection point)
+            y (float): Y in mils
+
+        Returns:
+            str: JSON object with the new marker
+        """
+        return await _schematic_edit("add_no_erc", {"schematic_path": schematic_path, "x": x, "y": y})
 
     @mcp.tool()
     async def sch_add_net_label(ctx: Context, schematic_path: str, net_name: str, x: float, y: float,

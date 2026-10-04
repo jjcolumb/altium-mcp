@@ -19,6 +19,11 @@ from collections import defaultdict
 
 TOL = 0.5  # mils
 
+# Object kinds whose names join nets across the sheets of a flat design.
+# (Altium's "Automatic" net identifier scope: with ports and no sheet symbols,
+# ports and power ports are global, net labels are local to their sheet.)
+GLOBAL_KINDS = ("power_port", "port", "off_sheet_connector")
+
 
 def _same(a, b):
     return abs(a[0] - b[0]) <= TOL and abs(a[1] - b[1]) <= TOL
@@ -75,8 +80,12 @@ class _Wire:
         return any(_same(p, e) for e in self.ends)
 
 
-def analyze_connectivity(sheet: dict) -> dict:
-    """Return {summary, issues, nets, unconnected_pins} for one sheet's objects."""
+def analyze_connectivity(sheet: dict, with_scope: bool = False) -> dict:
+    """Return {summary, issues, nets, unconnected_pins} for one sheet's objects.
+
+    with_scope adds "global_names" to each net: the names that reach other sheets
+    (power ports, ports, off-sheet connectors; net labels stay on their sheet).
+    """
     wires = [_Wire(i, w.get("vertices", [])) for i, w in enumerate(sheet.get("wires", []))]
     wires = [w for w in wires if len(w.points) >= 2]
     junctions = [(j["x"], j["y"]) for j in sheet.get("junctions", [])]
@@ -180,11 +189,13 @@ def analyze_connectivity(sheet: dict) -> dict:
             issue("dangling_wire_end", "warning", "Wire end is not connected to anything", end)
 
     # Nets.
-    groups = defaultdict(lambda: {"pins": [], "names": set()})
+    groups = defaultdict(lambda: {"pins": [], "names": set(), "global": set()})
     for key, _, _ in pins:
         groups[uf.find(("pin", key))]["pins"].append(key)
-    for _, name, _ in named:
+    for kind, name, _ in named:
         groups[uf.find(("net", name))]["names"].add(name)
+        if kind in GLOBAL_KINDS:
+            groups[uf.find(("net", name))]["global"].add(name)
 
     nets, unconnected = [], []
     for g in groups.values():
@@ -196,7 +207,10 @@ def analyze_connectivity(sheet: dict) -> dict:
                 unconnected.append(g["pins"][0])
             continue
         names = sorted(g["names"])
-        nets.append({"name": names[0] if names else None, "pins": sorted(g["pins"])})
+        net = {"name": names[0] if names else None, "pins": sorted(g["pins"])}
+        if with_scope:
+            net["global_names"] = sorted(g["global"])
+        nets.append(net)
         if len(names) > 1:
             issue("net_name_conflict", "warning",
                   f"One net carries several names: {', '.join(names)}", names=names)
@@ -229,4 +243,85 @@ def analyze_connectivity(sheet: dict) -> dict:
         "issues": issues,
         "nets": nets,
         "unconnected_pins": sorted(unconnected),
+    }
+
+
+def analyze_project(sheets: list) -> dict:
+    """Connectivity across the sheets of a flat design.
+
+    sheets: get_schematic_objects results, one per sheet. Nets on different sheets
+    join when they share a global name (power port, port, off-sheet connector).
+    Returns {summary, issues, nets, unconnected_pins}; issues carry their sheet.
+    """
+    issues, unconnected = [], []
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    sheet_nets = []          # (node, net, sheet)
+    port_sheets = defaultdict(set)
+    designator_sheets = defaultdict(set)
+    for sheet in sheets:
+        name = sheet.get("sheet")
+        result = analyze_connectivity(sheet, with_scope=True)
+        for entry in result["issues"]:
+            issues.append({**entry, "sheet": name})
+        unconnected += [{"pin": p, "sheet": name} for p in result["unconnected_pins"]]
+        for i, net in enumerate(result["nets"]):
+            node = (name, i)
+            find(node)
+            sheet_nets.append((node, net, name))
+            for g in net["global_names"]:
+                union(node, ("global", g))
+        for port in sheet.get("ports", []):
+            port_sheets[port["name"]].add(name)
+        for comp in sheet.get("components", []):
+            designator_sheets[comp["designator"]].add(name)
+
+    merged = defaultdict(lambda: {"pins": set(), "names": set(), "sheets": set()})
+    for node, net, name in sheet_nets:
+        m = merged[find(node)]
+        m["pins"].update(net["pins"])
+        m["names"].update(net["global_names"] or ([net["name"]] if net["name"] else []))
+        m["sheets"].add(name)
+
+    nets = []
+    for m in merged.values():
+        names = sorted(m["names"])
+        nets.append({"name": names[0] if names else None, "pins": sorted(m["pins"]),
+                     "sheets": sorted(m["sheets"])})
+        if len(names) > 1:
+            issues.append({"type": "net_name_conflict", "severity": "warning",
+                           "message": f"One net carries several names across sheets: {', '.join(names)}",
+                           "names": names, "sheet": None})
+    nets.sort(key=lambda n: (n["name"] is None, n["name"] or "", n["pins"]))
+
+    for port, where in sorted(port_sheets.items()):
+        if len(where) == 1 and len(sheets) > 1:
+            issues.append({"type": "port_unmatched", "severity": "warning",
+                           "message": f"Port {port} appears on only one sheet, so it connects to nothing",
+                           "port": port, "sheet": next(iter(where))})
+    for des, where in sorted(designator_sheets.items()):
+        if len(where) > 1:
+            issues.append({"type": "designator_on_several_sheets", "severity": "warning",
+                           "message": f"{des} is placed on {len(where)} sheets (fine only for parts of one multi-part component)",
+                           "component": des, "sheets": sorted(where)})
+
+    severities = [i["severity"] for i in issues]
+    return {
+        "sheets": [s.get("sheet") for s in sheets],
+        "summary": {"errors": severities.count("error"), "warnings": severities.count("warning"),
+                    "info": severities.count("info"), "nets": len(nets),
+                    "unconnected_pins": len(unconnected)},
+        "issues": issues,
+        "nets": nets,
+        "unconnected_pins": unconnected,
     }

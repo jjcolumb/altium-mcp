@@ -886,6 +886,40 @@ begin
         Obj.Justification := Just;
 end;
 
+// No ERC marker: marks a pin or wire end as intentionally unconnected.
+function SchEditAddNoErc(SchDoc: ISch_Document; RequestData: TStringList): String;
+var
+    X, Y: Double;
+    HasX, HasY, ValidX, ValidY: Boolean;
+    Obj: ISch_GraphicalObject;
+    Props: TStringList;
+begin
+    X := SchMcpGetFloat(RequestData, 'x', HasX, ValidX);
+    Y := SchMcpGetFloat(RequestData, 'y', HasY, ValidY);
+    if not (HasX and HasY and ValidX and ValidY) then
+    begin
+        Result := 'ERROR: numeric x and y are required';
+        Exit;
+    end;
+    Obj := SchServer.SchObjectFactory(eNoERC, eCreate_GlobalCopy);
+    if Obj = nil then
+    begin
+        Result := 'ERROR: Could not create No ERC marker';
+        Exit;
+    end;
+    Obj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    SchEditRegister(SchDoc, Obj);
+
+    Props := TStringList.Create;
+    try
+        AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+        AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+    end;
+end;
+
 // Net labels, power ports and text labels: a point object with text.
 function SchEditAddPointObject(SchDoc: ISch_Document; RequestData: TStringList; Action: String): String;
 var
@@ -1596,9 +1630,48 @@ begin
     Src.SchIterator_Destroy(SrcIter);
 end;
 
+// 'A4'..'A0', 'A'..'E', 'Letter', 'Legal', 'Tabloid', or custom 'WIDTHxHEIGHT'
+// in mils. Returns '' or 'ERROR: ...'; Style = -1 means custom.
+function SchEditParseSheetSize(S: String; var Style: Integer; var W: Integer; var H: Integer): String;
+var
+    U: String;
+    P: Integer;
+begin
+    Result := '';
+    Style := -2;
+    U := UpperCase(Trim(S));
+    if U = 'A4' then Style := eSheetA4
+    else if U = 'A3' then Style := eSheetA3
+    else if U = 'A2' then Style := eSheetA2
+    else if U = 'A1' then Style := eSheetA1
+    else if U = 'A0' then Style := eSheetA0
+    else if U = 'A' then Style := eSheetA
+    else if U = 'B' then Style := eSheetB
+    else if U = 'C' then Style := eSheetC
+    else if U = 'D' then Style := eSheetD
+    else if U = 'E' then Style := eSheetE
+    else if U = 'LETTER' then Style := eSheetLetter
+    else if U = 'LEGAL' then Style := eSheetLegal
+    else if U = 'TABLOID' then Style := eSheetTabloid
+    else
+    begin
+        P := Pos('X', U);
+        if (P > 1) and SchMcpIsNumber(Copy(U, 1, P - 1)) and SchMcpIsNumber(Copy(U, P + 1, Length(U))) then
+        begin
+            Style := -1;
+            W := Round(SafeStrToFloat(Copy(U, 1, P - 1)));
+            H := Round(SafeStrToFloat(Copy(U, P + 1, Length(U))));
+            if (W < 1000) or (H < 1000) or (W > 65000) or (H > 65000) then
+                Result := 'ERROR: custom sheet size must be 1000..65000 mils each way';
+        end
+        else
+            Result := 'ERROR: unknown sheet_size "' + S + '" (use A4..A0, A..E, Letter, Legal, Tabloid or WIDTHxHEIGHT in mils)';
+    end;
+end;
+
 function SchEditCreateSheet(RequestData: TStringList): String;
 var
-    NewPath, FormatPath, RegionCSV, Err: String;
+    NewPath, FormatPath, RegionCSV, Err, SizeName: String;
     FormatDoc, NewDoc: ISch_Document;
     ServerDoc: IServerDocument;
     Proj: IProject;
@@ -1608,6 +1681,7 @@ var
     HasRegion: Boolean;
     L, B, R, T, Copied, ParamCount: Integer;
     Area, BestArea: Double;
+    SizeStyle, SizeW, SizeH, ShiftX: Integer;
 begin
     NewPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'schematic_path'));
     FormatPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'copy_format_from'));
@@ -1627,6 +1701,17 @@ begin
     begin
         Result := 'ERROR: Folder does not exist: ' + ExtractFilePath(NewPath);
         Exit;
+    end;
+
+    SizeName := SchMcpGetString(RequestData, 'sheet_size');
+    if SizeName <> '' then
+    begin
+        Err := SchEditParseSheetSize(SizeName, SizeStyle, SizeW, SizeH);
+        if Err <> '' then
+        begin
+            Result := Err;
+            Exit;
+        end;
     end;
 
     HasRegion := RegionCSV <> '';
@@ -1684,10 +1769,32 @@ begin
     try
         Copied := 0;
         ParamCount := 0;
+        ShiftX := 0;
+        SchServer.ProcessControl.PreProcess(NewDoc, '');
+        if FormatDoc <> nil then
+            SchEditCopySheetSettings(FormatDoc, NewDoc);
+        if SizeName <> '' then
+        begin
+            if SizeStyle = -1 then
+            begin
+                NewDoc.UseCustomSheet := True;
+                NewDoc.CustomX := MilsToCoord(SizeW);
+                NewDoc.CustomY := MilsToCoord(SizeH);
+            end
+            else
+            begin
+                NewDoc.UseCustomSheet := False;
+                NewDoc.SetState_SheetStyle(SizeStyle);
+            end;
+        end;
+        // Sheet size properties only take effect after this.
+        NewDoc.UpdateDocumentProperties;
+
         if FormatDoc <> nil then
         begin
-            SchServer.ProcessControl.PreProcess(NewDoc, '');
-            SchEditCopySheetSettings(FormatDoc, NewDoc);
+            // Keep the title block in the bottom-right corner of a bigger or
+            // smaller sheet.
+            ShiftX := NewDoc.GetState_SheetSizeX - FormatDoc.GetState_SheetSizeX;
             ParamCount := SchEditCopySheetParameters(FormatDoc, NewDoc, ParamNames);
 
             // Auto-detect the title block: the largest drawing graphic in the
@@ -1735,15 +1842,17 @@ begin
                     begin
                         Dup := Obj.Replicate;
                         SchEditRegister(NewDoc, Dup);
+                        if ShiftX <> 0 then
+                            Dup.MoveByXY(ShiftX, 0);
                         Copied := Copied + 1;
                     end;
                     Obj := Iter.NextSchObject;
                 end;
                 FormatDoc.SchIterator_Destroy(Iter);
             end;
-            SchServer.ProcessControl.PostProcess(NewDoc, '');
-            NewDoc.GraphicallyInvalidate;
         end;
+        SchServer.ProcessControl.PostProcess(NewDoc, '');
+        NewDoc.GraphicallyInvalidate;
 
         ServerDoc.SetFileName(NewPath);
         ServerDoc.SetModified(True);
@@ -1766,6 +1875,7 @@ begin
         else
             Props.Add('"title_block_region": null');
         AddJSONInteger(Props, 'title_block_objects_copied', Copied);
+        AddJSONNumber(Props, 'title_block_shift_x', CoordToMils(ShiftX));
         Result := BuildJSONObject(Props);
     finally
         Props.Free;
@@ -1794,7 +1904,7 @@ begin
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and
        (Action <> 'add_power_port') and (Action <> 'add_text') and (Action <> 'add_junction') and
        (Action <> 'add_port') and (Action <> 'set_component_text') and
-       (Action <> 'delete_objects') and (Action <> 'modify_object') then
+       (Action <> 'delete_objects') and (Action <> 'modify_object') and (Action <> 'add_no_erc') then
     begin
         Result := 'ERROR: Unknown schematic_edit action: ' + Action;
         Exit;
@@ -1832,6 +1942,8 @@ begin
             Inner := SchEditDeleteObjects(SchDoc, RequestData)
         else if Action = 'modify_object' then
             Inner := SchEditModifyObject(SchDoc, RequestData)
+        else if Action = 'add_no_erc' then
+            Inner := SchEditAddNoErc(SchDoc, RequestData)
         else
             Inner := SchEditAddPointObject(SchDoc, RequestData, Action);
     finally
