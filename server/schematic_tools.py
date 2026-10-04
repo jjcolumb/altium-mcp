@@ -16,6 +16,8 @@ from typing import Optional
 
 from mcp.server.fastmcp import Context
 
+from schematic_connectivity import analyze_connectivity
+
 
 def _format_number(value) -> str:
     """Plain decimal text (no exponent) for the DelphiScript point parser."""
@@ -264,6 +266,66 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         """
         csv = _points_to_csv([[x1, y1], [x2, y2]])
         return await _schematic_edit("add_bus_entry", {"schematic_path": schematic_path, "points": csv})
+
+    @mcp.tool()
+    async def sch_add_junction(ctx: Context, schematic_path: str, x: float, y: float) -> str:
+        """
+        Add a junction dot on an existing schematic sheet.
+
+        Wires that cross are only connected where a junction sits on the crossing, so this
+        is how to join two crossing wires. T-joins (a wire END on another wire) connect
+        without one; Altium draws that dot by itself.
+
+        This does NOT save the schematic. After the edit, call get_schematic_objects on the
+        same sheet and confirm the change before relying on it. If the edit fails, stop and
+        report the error to the user instead of retrying with guessed values.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+            x (float): X in mils (on the wires being joined)
+            y (float): Y in mils (on the wires being joined)
+
+        Returns:
+            str: JSON object with the new junction
+        """
+        return await _schematic_edit("add_junction", {"schematic_path": schematic_path, "x": x, "y": y})
+
+    @mcp.tool()
+    async def check_schematic_connectivity(ctx: Context, schematic_path: str) -> str:
+        """
+        Check the wiring of ONE schematic sheet and list its nets. Read-only.
+
+        Run this after a batch of schematic edits. Reports:
+        - component_pins_shorted: error when both pins of a two-pin part are on one net;
+          info for other parts (normal for e.g. multiple GND pins)
+        - net_name_conflict, dangling_wire_end, floating_net_label, floating_power_port
+          (warnings)
+        - wire_through_pin (info): a wire runs through a pin's connection point and
+          continues, which connects the pin; fine if intended, a short if not
+        Also returns every net (name and pins, e.g. "R1.2") and the unconnected pins.
+        Net names come from net labels, power ports, ports (either end) and off-sheet
+        connectors. Crossing wires connect only at a junction; No ERC markers mark
+        intentional opens. Buses and bus entries are not traced. Includes unsaved edits.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+
+        Returns:
+            str: JSON object with summary, issues, nets and unconnected_pins
+        """
+        logger.info(f"Checking schematic connectivity for {schematic_path}")
+
+        response = await altium_bridge.execute_command(
+            "get_schematic_objects",
+            {"schematic_path": schematic_path}
+        )
+
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error reading schematic for connectivity check: {error_msg}")
+            return json.dumps({"success": False, "error": f"Failed to read schematic: {error_msg}"})
+
+        return json.dumps(analyze_connectivity(response.get("result", {})), indent=2)
 
     @mcp.tool()
     async def sch_add_net_label(ctx: Context, schematic_path: str, net_name: str, x: float, y: float,

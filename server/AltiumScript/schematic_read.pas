@@ -4,7 +4,8 @@
 { Shared request helpers for schematic editing, plus the get_schematic_objects }
 { command: a full read-back of ONE schematic sheet (components with pin       }
 { connection points, wires, buses, bus entries, net labels, power ports,       }
-{ junctions, ports, text labels and sheet settings).                           }
+{ junctions, ports, text labels, off-sheet connectors, No ERC markers and      }
+{ sheet settings).                                                             }
 {                                                                              }
 { Portions derived from altium-mcp by altium-mcp contributors (flaco-source),  }
 { https://github.com/flaco-source/altium-mcp                                   }
@@ -453,9 +454,10 @@ end;
 // Derived from flaco-source SchSerializeDrawingObject, extended with
 // orientation, power-port style and port I/O type.
 procedure SchMcpAddPrimitive(Obj: ISch_GraphicalObject; Wires, Buses, BusEntries, NetLabels,
-    PowerPorts, Junctions, Ports, Labels: TStringList);
+    PowerPorts, Junctions, Ports, Labels, OffSheet, NoErc: TStringList);
 var
     Props: TStringList;
+    Rect: IDispatch;
 begin
     Props := TStringList.Create;
     try
@@ -508,6 +510,19 @@ begin
             AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONNumber(Props, 'width', CoordToMils(Obj.Width));
+            // A port connects at BOTH ends. Its shape is long in the direction
+            // it points, so the bounding box tells horizontal from vertical.
+            Rect := Obj.BoundingRectangle;
+            if (Rect.Top - Rect.Bottom) > (Rect.Right - Rect.Left) then
+            begin
+                AddJSONNumber(Props, 'x2', CoordToMils(Obj.Location.X));
+                AddJSONNumber(Props, 'y2', CoordToMils(Obj.Location.Y + Obj.Width));
+            end
+            else
+            begin
+                AddJSONNumber(Props, 'x2', CoordToMils(Obj.Location.X + Obj.Width));
+                AddJSONNumber(Props, 'y2', CoordToMils(Obj.Location.Y));
+            end;
             Ports.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = eLabel then
@@ -517,6 +532,19 @@ begin
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
             Labels.Add(BuildJSONObject(Props, 1));
+        end
+        else if Obj.ObjectId = eCrossSheetConnector then
+        begin
+            AddJSONProperty(Props, 'net_name', Obj.Text);
+            AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+            AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+            OffSheet.Add(BuildJSONObject(Props, 1));
+        end
+        else if Obj.ObjectId = eNoERC then
+        begin
+            AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
+            AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
+            NoErc.Add(BuildJSONObject(Props, 1));
         end;
     finally
         Props.Free;
@@ -530,6 +558,7 @@ var
     Iter: ISch_Iterator;
     Obj: ISch_GraphicalObject;
     Props, Components, Wires, Buses, BusEntries, NetLabels, PowerPorts, Junctions, Ports, Labels: TStringList;
+    OffSheet, NoErc: TStringList;
 begin
     SheetPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'schematic_path'));
     Err := SchMcpResolveSheet(SheetPath, SchDoc);
@@ -549,18 +578,21 @@ begin
     Junctions := TStringList.Create;
     Ports := TStringList.Create;
     Labels := TStringList.Create;
+    OffSheet := TStringList.Create;
+    NoErc := TStringList.Create;
     try
         Iter := SchDoc.SchIterator_Create;
         Iter.SetState_IterationDepth(eIterateFirstLevel);
         Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eWire, eBus, eBusEntry, eNetLabel,
-            ePowerObject, eJunction, ePort, eLabel));
+            ePowerObject, eJunction, ePort, eLabel, eCrossSheetConnector, eNoERC));
         Obj := Iter.FirstSchObject;
         while Obj <> nil do
         begin
             if Obj.ObjectId = eSchComponent then
                 Components.Add(SchMcpComponentJSON(Obj))
             else
-                SchMcpAddPrimitive(Obj, Wires, Buses, BusEntries, NetLabels, PowerPorts, Junctions, Ports, Labels);
+                SchMcpAddPrimitive(Obj, Wires, Buses, BusEntries, NetLabels, PowerPorts, Junctions, Ports, Labels,
+                    OffSheet, NoErc);
             Obj := Iter.NextSchObject;
         end;
         SchDoc.SchIterator_Destroy(Iter);
@@ -577,8 +609,12 @@ begin
         Props.Add(BuildJSONArray(Junctions, 'junctions'));
         Props.Add(BuildJSONArray(Ports, 'ports'));
         Props.Add(BuildJSONArray(Labels, 'text_labels'));
+        Props.Add(BuildJSONArray(OffSheet, 'off_sheet_connectors'));
+        Props.Add(BuildJSONArray(NoErc, 'no_erc'));
         Result := BuildJSONObject(Props);
     finally
+        NoErc.Free;
+        OffSheet.Free;
         Labels.Free;
         Ports.Free;
         Junctions.Free;

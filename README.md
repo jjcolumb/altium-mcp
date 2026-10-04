@@ -141,12 +141,14 @@ The server provides several tools to interact with Altium Designer:
 
 ### Schematic Editing
 Edit an existing schematic sheet in place. Every tool takes an explicit `schematic_path` (it never edits whatever sheet happens to be focused), applies the change as one undo step, and **never saves** - review in Altium, then save or undo. Tool descriptions tell the agent to read the sheet back with `get_schematic_objects` after each edit. Coordinates are absolute sheet coordinates in mils.
-- `get_schematic_objects`: Read back one sheet: components with parameters and every pin's connection point, wires and buses (all vertices), bus entries, net labels, power ports, junctions, ports, text labels, and sheet settings. Includes unsaved edits.
+- `get_schematic_objects`: Read back one sheet: components with parameters and every pin's connection point, wires and buses (all vertices), bus entries, net labels, power ports, junctions, ports (both ends), off-sheet connectors, No ERC markers, text labels, and sheet settings. Includes unsaved edits.
+- `check_schematic_connectivity`: Read-only wiring check of one sheet, computed from `get_schematic_objects`: lists every net (name and pins) and unconnected pins, and reports shorted two-pin parts, wires running through pins, dangling wire ends, floating net labels/power ports, and nets with two names. Crossing wires connect only at a junction; T-joins connect without one (Altium draws that dot itself). Pure Python, unit-tested in `server/tests/test_schematic_connectivity.py`.
 - `sch_move_component`: Move and/or rotate a component; its text moves with it.
 - `sch_set_component_parameters`: Update parameters by name, or create missing ones (hidden).
 - `sch_place_component`: Place a symbol from a .SchLib, returning its pin connection points.
 - `sch_add_wire` / `sch_add_bus`: Draw a wire or bus through a list of points.
 - `sch_add_bus_entry`: Add a bus entry.
+- `sch_add_junction`: Add a junction, e.g. to connect two crossing wires.
 - `sch_add_net_label` / `sch_add_power_port` / `sch_add_text`: Add a net label, power port (bar, arrow, circle, wave, ground styles) or free text.
 
 The DelphiScript for these tools is derived from [flaco-source/altium-mcp](https://github.com/flaco-source/altium-mcp) (MIT). See [NOTICE](NOTICE).
