@@ -17,6 +17,7 @@ from typing import Optional
 from mcp.server.fastmcp import Context
 
 from schematic_connectivity import analyze_connectivity
+from schematic_layout import analyze_layout
 
 
 def _format_number(value) -> str:
@@ -215,7 +216,8 @@ def register_schematic_tools(mcp, altium_bridge, logger):
                 [{"name": "Designator", "x": 4300, "y": 2600},
                  {"name": "Comment", "x": 4300, "y": 2500, "visible": true, "justification": "bottom_left"},
                  {"name": "Value", "visible": false}]
-                "name" is "Designator" or a parameter name. Optional keys: x, y, visible,
+                "name" is "Designator" or a parameter name (entries from get_schematic_objects
+                "text" can be passed as-is; bbox is ignored). Optional keys: x, y, visible,
                 rotation (0/90/180/270), justification (bottom_left, bottom_center,
                 bottom_right, center_left, center, center_right, top_left, top_center,
                 top_right). Omitted keys are left unchanged.
@@ -230,7 +232,9 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         for item in texts:
             if not isinstance(item, dict) or not str(item.get("name", "")).strip():
                 return json.dumps({"success": False, "error": f"each text needs a name, got {item!r}"})
-            unknown = set(item) - {"name", "x", "y", "visible", "rotation", "justification"}
+            # "bbox" is read-only output of get_schematic_objects; accept it so read-back
+            # placements can be passed straight in.
+            unknown = set(item) - {"name", "x", "y", "visible", "rotation", "justification", "bbox"}
             if unknown:
                 return json.dumps({"success": False, "error": f"unknown keys {sorted(unknown)} in {item!r}"})
             try:
@@ -454,6 +458,44 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             return json.dumps({"success": False, "error": f"Failed to read schematic: {error_msg}"})
 
         return json.dumps(analyze_connectivity(response.get("result", {})), indent=2)
+
+    @mcp.tool()
+    async def check_schematic_layout(ctx: Context, schematic_path: str) -> str:
+        """
+        Check the readability of ONE schematic sheet's layout. Read-only.
+
+        Run this after placing or moving parts and drawing wires, alongside
+        check_schematic_connectivity (which checks the wiring, not the drawing). Reports:
+        - body_overlap: error when two parts' bodies collide; warning when they only touch
+        - wire_crosses_body (error): a wire runs across a part instead of ending at a pin
+        - text_overlap, text_over_wire, text_over_body (warnings): a designator, parameter,
+          note, net label, power port or port collides with other text, a wire, or another
+          part (a part's own designator inside its body is fine)
+        - wire_overlap (warning): two wires drawn on top of each other
+        - off_sheet, in_title_block (warnings)
+        - off_grid (warning): a pin, wire vertex, port or label off the snap grid
+        - diagonal_wire (info)
+        Each issue has x, y in mils. Title block content is not checked. Includes unsaved edits.
+
+        Args:
+            schematic_path (str): Full path to the .SchDoc file
+
+        Returns:
+            str: JSON object with summary, title_block and issues
+        """
+        logger.info(f"Checking schematic layout for {schematic_path}")
+
+        response = await altium_bridge.execute_command(
+            "get_schematic_objects",
+            {"schematic_path": schematic_path}
+        )
+
+        if not response.get("success", False):
+            error_msg = response.get("error", "Unknown error")
+            logger.error(f"Error reading schematic for layout check: {error_msg}")
+            return json.dumps({"success": False, "error": f"Failed to read schematic: {error_msg}"})
+
+        return json.dumps(analyze_layout(response.get("result", {})), indent=2)
 
     @mcp.tool()
     async def sch_add_net_label(ctx: Context, schematic_path: str, net_name: str, x: float, y: float,

@@ -459,6 +459,50 @@ begin
     end;
 end;
 
+// Bounding box as [left, bottom, right, top] in mils.
+function SchMcpBBoxJSON(Obj: ISch_GraphicalObject): String;
+begin
+    Result := '[' + IntToStr(CoordToMils(Obj.BoundingRectangle.Left)) + ', ' +
+              IntToStr(CoordToMils(Obj.BoundingRectangle.Bottom)) + ', ' +
+              IntToStr(CoordToMils(Obj.BoundingRectangle.Right)) + ', ' +
+              IntToStr(CoordToMils(Obj.BoundingRectangle.Top)) + ']';
+end;
+
+// Extent of a component's drawn body (graphics only: no pins, no text) for
+// the visible part, as [l, b, r, t] mils; 'null' when it draws nothing.
+function SchMcpBodyJSON(Comp: ISch_Component): String;
+var
+    Iter: ISch_Iterator;
+    Prim: ISch_GraphicalObject;
+    L, B, R, T: Integer;
+    Found: Boolean;
+begin
+    Found := False;
+    L := 0; B := 0; R := 0; T := 0;
+    Iter := Comp.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eLine, eRectangle, eRoundRectangle, eArc, ePolyline, eEllipse,
+        ePolygon, eBezier, eImage));
+    Prim := Iter.FirstSchObject;
+    while Prim <> nil do
+    begin
+        if (Prim.OwnerPartId = 0) or (Prim.OwnerPartId = Comp.CurrentPartID) then
+        begin
+            if not Found or (Prim.BoundingRectangle.Left < L) then L := Prim.BoundingRectangle.Left;
+            if not Found or (Prim.BoundingRectangle.Bottom < B) then B := Prim.BoundingRectangle.Bottom;
+            if not Found or (Prim.BoundingRectangle.Right > R) then R := Prim.BoundingRectangle.Right;
+            if not Found or (Prim.BoundingRectangle.Top > T) then T := Prim.BoundingRectangle.Top;
+            Found := True;
+        end;
+        Prim := Iter.NextSchObject;
+    end;
+    Comp.SchIterator_Destroy(Iter);
+    if Found then
+        Result := '[' + IntToStr(CoordToMils(L)) + ', ' + IntToStr(CoordToMils(B)) + ', ' +
+                  IntToStr(CoordToMils(R)) + ', ' + IntToStr(CoordToMils(T)) + ']'
+    else
+        Result := 'null';
+end;
+
 // Placement of one component text (designator or parameter).
 function SchMcpTextPlacementJSON(Txt: ISch_GraphicalObject): String;
 var
@@ -471,6 +515,7 @@ begin
         AddJSONBoolean(Props, 'visible', not Txt.IsHidden);
         AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Txt.Orientation));
         AddJSONProperty(Props, 'justification', SchMcpJustificationName(Txt.Justification));
+        Props.Add('"bbox": ' + SchMcpBBoxJSON(Txt));
         Result := BuildJSONObject(Props, 2);
     finally
         Props.Free;
@@ -495,8 +540,11 @@ begin
         AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Comp.Orientation));
         AddJSONBoolean(Props, 'mirrored', Comp.IsMirrored);
         AddJSONInteger(Props, 'part_id', Comp.CurrentPartID);
+        Props.Add('"body": ' + SchMcpBodyJSON(Comp));
 
         Iter := Comp.SchIterator_Create;
+        // Direct children only: a sim model's own parameters (e.g. its "Value") are deeper.
+        Iter.SetState_IterationDepth(eIterateFirstLevel);
         Iter.AddFilter_ObjectSet(MkSet(eParameter));
         Param := Iter.FirstSchObject;
         while Param <> nil do
@@ -572,6 +620,7 @@ begin
             AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
+            Props.Add('"bbox": ' + SchMcpBBoxJSON(Obj));
             NetLabels.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = ePowerObject then
@@ -582,6 +631,7 @@ begin
             AddJSONNumber(Props, 'x', CoordToMils(Obj.Location.X));
             AddJSONNumber(Props, 'y', CoordToMils(Obj.Location.Y));
             AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Obj.Orientation));
+            Props.Add('"bbox": ' + SchMcpBBoxJSON(Obj));
             PowerPorts.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = eJunction then
@@ -611,6 +661,7 @@ begin
                 AddJSONNumber(Props, 'x2', CoordToMils(Obj.Location.X + Obj.Width));
                 AddJSONNumber(Props, 'y2', CoordToMils(Obj.Location.Y));
             end;
+            Props.Add('"bbox": ' + SchMcpBBoxJSON(Obj));
             Ports.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = eLabel then
@@ -622,6 +673,7 @@ begin
             AddJSONProperty(Props, 'justification', SchMcpJustificationName(Obj.Justification));
             AddJSONProperty(Props, 'color', SchMcpColorHex(Obj.Color));
             Props.Add('"font": ' + SchMcpFontJSON(Obj.FontID));
+            Props.Add('"bbox": ' + SchMcpBBoxJSON(Obj));
             Labels.Add(BuildJSONObject(Props, 1));
         end
         else if Obj.ObjectId = eCrossSheetConnector then
@@ -649,7 +701,7 @@ var
     Iter: ISch_Iterator;
     Obj: ISch_GraphicalObject;
     Props, Components, Wires, Buses, BusEntries, NetLabels, PowerPorts, Junctions, Ports, Labels: TStringList;
-    OffSheet, NoErc: TStringList;
+    OffSheet, NoErc, Graphics, GProps: TStringList;
 begin
     SheetPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'schematic_path'));
     Err := SchMcpResolveSheet(SheetPath, SchDoc);
@@ -671,16 +723,31 @@ begin
     Labels := TStringList.Create;
     OffSheet := TStringList.Create;
     NoErc := TStringList.Create;
+    Graphics := TStringList.Create;
     try
         Iter := SchDoc.SchIterator_Create;
         Iter.SetState_IterationDepth(eIterateFirstLevel);
         Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eWire, eBus, eBusEntry, eNetLabel,
-            ePowerObject, eJunction, ePort, eLabel, eCrossSheetConnector, eNoERC));
+            ePowerObject, eJunction, ePort, eLabel, eCrossSheetConnector, eNoERC,
+            ePolyline, eLine, eRectangle, eRoundRectangle, eImage, eTextFrame));
         Obj := Iter.FirstSchObject;
         while Obj <> nil do
         begin
             if Obj.ObjectId = eSchComponent then
                 Components.Add(SchMcpComponentJSON(Obj))
+            else if (Obj.ObjectId = ePolyline) or (Obj.ObjectId = eLine) or (Obj.ObjectId = eRectangle) or
+                    (Obj.ObjectId = eRoundRectangle) or (Obj.ObjectId = eImage) or (Obj.ObjectId = eTextFrame) then
+            begin
+                // Sheet drawing (title block, frames); extent only.
+                GProps := TStringList.Create;
+                try
+                    AddJSONInteger(GProps, 'object_id', Obj.ObjectId);
+                    GProps.Add('"bbox": ' + SchMcpBBoxJSON(Obj));
+                    Graphics.Add(BuildJSONObject(GProps, 1));
+                finally
+                    GProps.Free;
+                end;
+            end
             else
                 SchMcpAddPrimitive(Obj, Wires, Buses, BusEntries, NetLabels, PowerPorts, Junctions, Ports, Labels,
                     OffSheet, NoErc);
@@ -702,8 +769,10 @@ begin
         Props.Add(BuildJSONArray(Labels, 'text_labels'));
         Props.Add(BuildJSONArray(OffSheet, 'off_sheet_connectors'));
         Props.Add(BuildJSONArray(NoErc, 'no_erc'));
+        Props.Add(BuildJSONArray(Graphics, 'drawing_graphics'));
         Result := BuildJSONObject(Props);
     finally
+        Graphics.Free;
         NoErc.Free;
         OffSheet.Free;
         Labels.Free;
