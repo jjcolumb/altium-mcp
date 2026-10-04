@@ -4,7 +4,7 @@
 { The schematic_edit command: one edit action on an EXISTING schematic sheet.  }
 { Actions: move_component, set_component_parameters, place_component,         }
 { add_wire, add_bus, add_bus_entry, add_junction, add_net_label,              }
-{ add_power_port, add_port, add_text.                                          }
+{ add_power_port, add_port, add_text, and create_sheet (a new file).          }
 {                                                                              }
 { Every edit is wrapped in PreProcess/PostProcess (one undo step), new objects }
 { are registered with the robot manager, and modified objects are bracketed by }
@@ -738,6 +738,255 @@ begin
 end;
 
 {..............................................................................}
+{ create_sheet: a NEW blank sheet, optionally formatted like another sheet.    }
+{ The only action that writes a file, and it never overwrites one.             }
+{..............................................................................}
+
+function SchEditInRegion(Obj: ISch_GraphicalObject; L, B, R, T: Integer): Boolean;
+var
+    Tol: Integer;
+begin
+    Tol := MilsToCoord(10);
+    // A label's extent depends on its displayed value (a long "=Parameter"
+    // can spill past the box), so labels count by their anchor point.
+    if Obj.ObjectId = eLabel then
+        Result := (Obj.Location.X >= L - Tol) and (Obj.Location.X <= R + Tol) and
+                  (Obj.Location.Y >= B - Tol) and (Obj.Location.Y <= T + Tol)
+    else
+        Result := (Obj.BoundingRectangle.Left >= L - Tol) and (Obj.BoundingRectangle.Right <= R + Tol) and
+                  (Obj.BoundingRectangle.Bottom >= B - Tol) and (Obj.BoundingRectangle.Top <= T + Tol);
+end;
+
+// Copy sheet size, grids and border settings from Src to Dst.
+procedure SchEditCopySheetSettings(Src, Dst: ISch_Document);
+begin
+    Dst.SheetStyle := Src.SheetStyle;
+    Dst.UseCustomSheet := Src.UseCustomSheet;
+    Dst.CustomX := Src.CustomX;
+    Dst.CustomY := Src.CustomY;
+    Dst.SnapGridOn := Src.SnapGridOn;
+    Dst.SnapGridSize := Src.SnapGridSize;
+    Dst.VisibleGridOn := Src.VisibleGridOn;
+    Dst.VisibleGridSize := Src.VisibleGridSize;
+    Dst.BorderOn := Src.BorderOn;
+    Dst.TitleBlockOn := Src.TitleBlockOn;
+    if Src.TemplateFileName <> '' then
+        Dst.TemplateFileName := Src.TemplateFileName;
+end;
+
+// Copy document parameters that have a value ('*' means unset). Adds the
+// copied names (JSON strings) to Names and returns how many were copied.
+function SchEditCopySheetParameters(Src, Dst: ISch_Document; Names: TStringList): Integer;
+var
+    SrcIter, DstIter: ISch_Iterator;
+    SrcParam, DstParam: ISch_Parameter;
+begin
+    Result := 0;
+    SrcIter := Src.SchIterator_Create;
+    SrcIter.SetState_IterationDepth(eIterateFirstLevel);
+    SrcIter.AddFilter_ObjectSet(MkSet(eParameter));
+    SrcParam := SrcIter.FirstSchObject;
+    while SrcParam <> nil do
+    begin
+        if (SrcParam.Text <> '*') and (SrcParam.Text <> '') then
+        begin
+            DstIter := Dst.SchIterator_Create;
+            DstIter.SetState_IterationDepth(eIterateFirstLevel);
+            DstIter.AddFilter_ObjectSet(MkSet(eParameter));
+            DstParam := DstIter.FirstSchObject;
+            while DstParam <> nil do
+            begin
+                if UpperCase(DstParam.Name) = UpperCase(SrcParam.Name) then
+                    Break;
+                DstParam := DstIter.NextSchObject;
+            end;
+            Dst.SchIterator_Destroy(DstIter);
+
+            if DstParam <> nil then
+                DstParam.Text := SrcParam.Text
+            else
+            begin
+                DstParam := SrcParam.Replicate;
+                SchEditRegister(Dst, DstParam);
+            end;
+            Names.Add('"' + JSONEscapeString(SrcParam.Name) + '"');
+            Result := Result + 1;
+        end;
+        SrcParam := SrcIter.NextSchObject;
+    end;
+    Src.SchIterator_Destroy(SrcIter);
+end;
+
+function SchEditCreateSheet(RequestData: TStringList): String;
+var
+    NewPath, FormatPath, RegionCSV, Err: String;
+    FormatDoc, NewDoc: ISch_Document;
+    ServerDoc: IServerDocument;
+    Proj: IProject;
+    Coords, ParamNames, Props: TStringList;
+    Iter: ISch_Iterator;
+    Obj, Dup: ISch_GraphicalObject;
+    HasRegion: Boolean;
+    L, B, R, T, Copied, ParamCount: Integer;
+begin
+    NewPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'schematic_path'));
+    FormatPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'copy_format_from'));
+    RegionCSV := SchMcpGetString(RequestData, 'title_block_region');
+
+    if LowerCase(ExtractFileExt(NewPath)) <> '.schdoc' then
+    begin
+        Result := 'ERROR: schematic_path must be a .SchDoc file: ' + NewPath;
+        Exit;
+    end;
+    if FileExists(NewPath) then
+    begin
+        Result := 'ERROR: File already exists (create_sheet never overwrites): ' + NewPath;
+        Exit;
+    end;
+    if not DirectoryExists(ExtractFilePath(NewPath)) then
+    begin
+        Result := 'ERROR: Folder does not exist: ' + ExtractFilePath(NewPath);
+        Exit;
+    end;
+
+    HasRegion := RegionCSV <> '';
+    if HasRegion then
+    begin
+        Coords := TStringList.Create;
+        try
+            Err := SchEditParsePoints(RegionCSV, 2, Coords);
+            if (Err = '') and (Coords.Count <> 4) then
+                Err := 'ERROR: title_block_region takes exactly 4 numbers';
+            if Err <> '' then
+            begin
+                Result := Err;
+                Exit;
+            end;
+            L := SchEditCoord(Coords, 0);
+            R := SchEditCoord(Coords, 2);
+            if R < L then begin R := L; L := SchEditCoord(Coords, 2); end;
+            B := SchEditCoord(Coords, 1);
+            T := SchEditCoord(Coords, 3);
+            if T < B then begin T := B; B := SchEditCoord(Coords, 3); end;
+        finally
+            Coords.Free;
+        end;
+    end;
+
+    FormatDoc := nil;
+    if FormatPath <> '' then
+    begin
+        Err := SchMcpResolveSheet(FormatPath, FormatDoc);
+        if Err <> '' then
+        begin
+            Result := Err;
+            Exit;
+        end;
+    end;
+
+    ServerDoc := CreateNewDocumentFromDocumentKind('SCH');
+    NewDoc := SchServer.GetCurrentSchDocument;
+    if (ServerDoc = nil) or (NewDoc = nil) or (NewDoc.ObjectID <> 32) then
+    begin
+        Result := 'ERROR: Could not create a new schematic document';
+        Exit;
+    end;
+
+    // A new document can be adopted by the focused project; a created sheet
+    // must not change the user's project (same rule as BuildCircuitFromSpec).
+    Proj := GetWorkspace.DM_FocusedProject;
+    if Proj <> nil then
+        if Pos('Free Documents', Proj.DM_ProjectFileName) = 0 then
+            Proj.DM_RemoveSourceDocument(NewDoc.DocumentName);
+
+    ParamNames := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        Copied := 0;
+        ParamCount := 0;
+        if FormatDoc <> nil then
+        begin
+            SchServer.ProcessControl.PreProcess(NewDoc, '');
+            SchEditCopySheetSettings(FormatDoc, NewDoc);
+            ParamCount := SchEditCopySheetParameters(FormatDoc, NewDoc, ParamNames);
+
+            // Auto-detect the title block: drawing graphics in the
+            // bottom-right quarter of the sheet.
+            if not HasRegion then
+            begin
+                L := 2000000000; B := 2000000000; R := -2000000000; T := -2000000000;
+                Iter := FormatDoc.SchIterator_Create;
+                Iter.SetState_IterationDepth(eIterateFirstLevel);
+                Iter.AddFilter_ObjectSet(MkSet(ePolyline, eLine, eRectangle, eRoundRectangle, eImage, eTextFrame));
+                Obj := Iter.FirstSchObject;
+                while Obj <> nil do
+                begin
+                    if (Obj.BoundingRectangle.Left >= FormatDoc.GetState_SheetSizeX div 2) and
+                       (Obj.BoundingRectangle.Top <= FormatDoc.GetState_SheetSizeY div 2) then
+                    begin
+                        HasRegion := True;
+                        if Obj.BoundingRectangle.Left < L then L := Obj.BoundingRectangle.Left;
+                        if Obj.BoundingRectangle.Bottom < B then B := Obj.BoundingRectangle.Bottom;
+                        if Obj.BoundingRectangle.Right > R then R := Obj.BoundingRectangle.Right;
+                        if Obj.BoundingRectangle.Top > T then T := Obj.BoundingRectangle.Top;
+                    end;
+                    Obj := Iter.NextSchObject;
+                end;
+                FormatDoc.SchIterator_Destroy(Iter);
+            end;
+
+            if HasRegion then
+            begin
+                Iter := FormatDoc.SchIterator_Create;
+                Iter.SetState_IterationDepth(eIterateFirstLevel);
+                Iter.AddFilter_ObjectSet(MkSet(ePolyline, eLine, eRectangle, eRoundRectangle, eImage, eTextFrame,
+                    eLabel, eArc, eEllipse, ePolygon, eBezier));
+                Obj := Iter.FirstSchObject;
+                while Obj <> nil do
+                begin
+                    if SchEditInRegion(Obj, L, B, R, T) then
+                    begin
+                        Dup := Obj.Replicate;
+                        SchEditRegister(NewDoc, Dup);
+                        Copied := Copied + 1;
+                    end;
+                    Obj := Iter.NextSchObject;
+                end;
+                FormatDoc.SchIterator_Destroy(Iter);
+            end;
+            SchServer.ProcessControl.PostProcess(NewDoc, '');
+            NewDoc.GraphicallyInvalidate;
+        end;
+
+        ServerDoc.SetFileName(NewPath);
+        ServerDoc.SetModified(True);
+        ServerDoc.DoFileSave('');
+        if not FileExists(NewPath) then
+        begin
+            Result := 'ERROR: Sheet was created but could not be saved to ' + NewPath;
+            Exit;
+        end;
+
+        AddJSONProperty(Props, 'created', NewPath);
+        AddJSONProperty(Props, 'format_copied_from', FormatPath);
+        AddJSONNumber(Props, 'sheet_size_x', CoordToMils(NewDoc.GetState_SheetSizeX));
+        AddJSONNumber(Props, 'sheet_size_y', CoordToMils(NewDoc.GetState_SheetSizeY));
+        AddJSONProperty(Props, 'template_file', NewDoc.TemplateFileName);
+        Props.Add(BuildJSONArray(ParamNames, 'sheet_parameters_copied'));
+        if HasRegion then
+            Props.Add('"title_block_region": [' + IntToStr(CoordToMils(L)) + ', ' + IntToStr(CoordToMils(B)) +
+                      ', ' + IntToStr(CoordToMils(R)) + ', ' + IntToStr(CoordToMils(T)) + ']')
+        else
+            Props.Add('"title_block_region": null');
+        AddJSONInteger(Props, 'title_block_objects_copied', Copied);
+        Result := BuildJSONObject(Props);
+    finally
+        Props.Free;
+        ParamNames.Free;
+    end;
+end;
+
+{..............................................................................}
 { Entry point for the 'schematic_edit' bridge command.                         }
 {..............................................................................}
 function ExecuteSchematicEdit(RequestData: TStringList): String;
@@ -748,6 +997,11 @@ var
     Props: TStringList;
 begin
     Action := LowerCase(SchMcpGetString(RequestData, 'action'));
+    if Action = 'create_sheet' then
+    begin
+        Result := SchEditCreateSheet(RequestData);
+        Exit;
+    end;
     if (Action <> 'move_component') and (Action <> 'set_component_parameters') and
        (Action <> 'place_component') and (Action <> 'add_wire') and (Action <> 'add_bus') and
        (Action <> 'add_bus_entry') and (Action <> 'add_net_label') and

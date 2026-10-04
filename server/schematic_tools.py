@@ -93,6 +93,43 @@ def register_schematic_tools(mcp, altium_bridge, logger):
         return json.dumps(response.get("result", {}), indent=2)
 
     @mcp.tool()
+    async def sch_create_sheet(ctx: Context, schematic_path: str, copy_format_from: str = "",
+                               title_block_region: Optional[list] = None) -> str:
+        """
+        Create a NEW blank schematic sheet file, optionally formatted like an existing sheet.
+
+        This is the only schematic tool that writes a file: it saves the new, empty (or
+        formatted) sheet once, and refuses if the file already exists. The sheet is opened
+        in Altium as a free document; it is not added to any project. Later sch_* edits
+        on it are not saved, as usual.
+
+        With copy_format_from it copies that sheet's size, grid and border settings, its
+        sheet template file (if it uses one), its sheet parameters that have values
+        (Title, Revision, ...), and every drawing object inside its title block - lines,
+        rectangles, images, text frames and labels, including "=Parameter" special
+        strings, which stay live. The title block is found automatically as the drawing
+        graphics in the bottom-right quarter of the sheet, or given explicitly.
+
+        Args:
+            schematic_path (str): Full path for the new .SchDoc (must not exist yet)
+            copy_format_from (str): Optional full path of a .SchDoc to copy the format from
+            title_block_region (list): Optional [x1, y1, x2, y2] in mils on the format sheet;
+                everything fully inside is copied. Default: auto-detect.
+
+        Returns:
+            str: JSON object describing what was created and copied
+        """
+        params = {"schematic_path": schematic_path, "copy_format_from": copy_format_from}
+        if title_block_region is not None:
+            if not isinstance(title_block_region, list) or len(title_block_region) != 4:
+                return json.dumps({"success": False, "error": "title_block_region must be [x1, y1, x2, y2]"})
+            try:
+                params["title_block_region"] = _points_to_csv([title_block_region[:2], title_block_region[2:]])
+            except ValueError as e:
+                return json.dumps({"success": False, "error": str(e)})
+        return await _schematic_edit("create_sheet", params)
+
+    @mcp.tool()
     async def sch_move_component(ctx: Context, schematic_path: str, cmp_designator: str,
                                  x: Optional[float] = None, y: Optional[float] = None,
                                  rotation: Optional[float] = None) -> str:
