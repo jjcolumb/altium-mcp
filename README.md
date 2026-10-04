@@ -149,7 +149,7 @@ Edit an existing schematic sheet in place. Every tool takes an explicit `schemat
 - `sch_move_component`: Move and/or rotate a component; its text moves with it.
 - `sch_set_component_parameters`: Update parameters by name, or create missing ones (hidden).
 - `sch_set_component_text`: Position, rotate, justify, show or hide a part's designator and parameter texts (several per call).
-- `sch_place_component`: Place a symbol from a .SchLib, returning its pin connection points.
+- `sch_place_component`: Place a symbol (or one part of a multi-part symbol) from a .SchLib, returning its pin connection points.
 - `sch_add_wire` / `sch_add_bus`: Draw a wire or bus through a list of points.
 - `sch_add_bus_entry`: Add a bus entry.
 - `sch_add_junction`: Add a junction, e.g. to connect two crossing wires.

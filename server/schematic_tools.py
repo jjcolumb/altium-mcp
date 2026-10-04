@@ -188,7 +188,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
     @mcp.tool()
     async def sch_move_component(ctx: Context, schematic_path: str, cmp_designator: str,
                                  x: Optional[float] = None, y: Optional[float] = None,
-                                 rotation: Optional[float] = None) -> str:
+                                 rotation: Optional[float] = None, part: Optional[int] = None) -> str:
         """
         Move and/or rotate a component on an existing schematic sheet (absolute values).
 
@@ -206,11 +206,14 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             x (float): New absolute X of the component origin in mils (optional)
             y (float): New absolute Y of the component origin in mils (optional)
             rotation (float): New absolute rotation in degrees (optional)
+            part (int): For multi-part components, which part to move (default: the first found)
 
         Returns:
             str: JSON object with the result of the edit
         """
         params = {"schematic_path": schematic_path, "designator": cmp_designator}
+        if part is not None:
+            params["part"] = part
         if x is not None:
             params["x"] = x
         if y is not None:
@@ -252,7 +255,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
 
     @mcp.tool()
     async def sch_set_component_text(ctx: Context, schematic_path: str, cmp_designator: str,
-                                     texts: list) -> str:
+                                     texts: list, part: Optional[int] = None) -> str:
         """
         Position, rotate, justify, show or hide a component's designator and parameter texts.
 
@@ -276,6 +279,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
                 rotation (0/90/180/270), justification (bottom_left, bottom_center,
                 bottom_right, center_left, center, center_right, top_left, top_center,
                 top_right). Omitted keys are left unchanged.
+            part (int): For multi-part components, which part's labels (default: the first found)
 
         Returns:
             str: JSON object with the resulting placement of each text
@@ -302,20 +306,21 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             visible = item.get("visible")
             arrays["text_visible"].append("" if visible is None else ("true" if visible else "false"))
             arrays["text_justification"].append(str(item.get("justification") or ""))
-        return await _schematic_edit("set_component_text", {
-            "schematic_path": schematic_path,
-            "designator": cmp_designator,
-            **arrays,
-        })
+        params = {"schematic_path": schematic_path, "designator": cmp_designator, **arrays}
+        if part is not None:
+            params["part"] = part
+        return await _schematic_edit("set_component_text", params)
 
     @mcp.tool()
     async def sch_place_component(ctx: Context, schematic_path: str, library_path: str, lib_reference: str,
-                                  designator: str, x: float, y: float, rotation: float = 0) -> str:
+                                  designator: str, x: float, y: float, rotation: float = 0,
+                                  part: int = 1) -> str:
         """
         Place a symbol from a schematic library (.SchLib) onto an existing schematic sheet.
 
         Use search_library_symbol to find the lib_reference first. Fails if the designator
-        already exists on the sheet. Returns the placed part's pin connection points so
+        already exists on the sheet - except for another part of a multi-part symbol: place
+        part 1 and part 2 of "U5" as two calls with the same designator and part=1 / part=2. Returns the placed part's pin connection points so
         wires can be routed to them.
 
         This does NOT save the schematic. After the edit, call get_schematic_objects on the
@@ -330,6 +335,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             x (float): Absolute X of the component origin in mils
             y (float): Absolute Y of the component origin in mils
             rotation (float): Rotation in degrees (0, 90, 180, 270)
+            part (int): Which part of a multi-part symbol to place (1 = A, 2 = B, ...)
 
         Returns:
             str: JSON object with the placed component and its pins
@@ -342,6 +348,7 @@ def register_schematic_tools(mcp, altium_bridge, logger):
             "x": x,
             "y": y,
             "rotation": rotation,
+            "part": part,
         })
 
     @mcp.tool()

@@ -68,7 +68,9 @@ begin
     else Result := False;
 end;
 
-function SchEditFindComponent(SchDoc: ISch_Document; Designator: String): ISch_Component;
+// Part = 0 returns the first part found; otherwise only that part (multi-part
+// components appear once per placed part, all with the same designator).
+function SchEditFindComponent(SchDoc: ISch_Document; Designator: String; Part: Integer): ISch_Component;
 var
     Iter: ISch_Iterator;
     Comp: ISch_Component;
@@ -80,7 +82,8 @@ begin
     Comp := Iter.FirstSchObject;
     while Comp <> nil do
     begin
-        if UpperCase(Trim(Comp.Designator.Text)) = UpperCase(Trim(Designator)) then
+        if (UpperCase(Trim(Comp.Designator.Text)) = UpperCase(Trim(Designator))) and
+           ((Part = 0) or (Comp.CurrentPartID = Part)) then
         begin
             Result := Comp;
             Break;
@@ -88,6 +91,19 @@ begin
         Comp := Iter.NextSchObject;
     end;
     SchDoc.SchIterator_Destroy(Iter);
+end;
+
+// Optional 'part' request key: Part (0 if absent). Returns False if invalid.
+function SchEditGetPart(RequestData: TStringList; var Part: Integer): Boolean;
+var
+    V: Double;
+    Has, Valid: Boolean;
+begin
+    Part := 0;
+    V := SchMcpGetFloat(RequestData, 'part', Has, Valid);
+    Result := Valid and ((not Has) or ((V >= 1) and (V = Round(V))));
+    if Result and Has then
+        Part := Round(V);
 end;
 
 // Parse "x1,y1,x2,y2,..." into Coords (as strings, mils). Returns '' or an
@@ -167,6 +183,7 @@ end;
 // and parameter text travel with the part.
 function SchEditMoveComponent(SchDoc: ISch_Document; RequestData: TStringList): String;
 var
+    Part: Integer;
     Designator: String;
     Comp: ISch_Component;
     X, Y, Rot: Double;
@@ -192,8 +209,13 @@ begin
         Result := 'ERROR: give at least one of x, y, rotation';
         Exit;
     end;
+    if not SchEditGetPart(RequestData, Part) then
+    begin
+        Result := 'ERROR: part must be a whole number from 1';
+        Exit;
+    end;
 
-    Comp := SchEditFindComponent(SchDoc, Designator);
+    Comp := SchEditFindComponent(SchDoc, Designator, Part);
     if Comp = nil then
     begin
         Result := 'ERROR: Component not found on sheet: ' + Designator;
@@ -260,7 +282,7 @@ begin
                 Exit;
             end;
 
-        Comp := SchEditFindComponent(SchDoc, Designator);
+        Comp := SchEditFindComponent(SchDoc, Designator, 0);
         if Comp = nil then
         begin
             Result := 'ERROR: Component not found on sheet: ' + Designator;
@@ -351,7 +373,7 @@ var
     Iter: ISch_Iterator;
     Param: ISch_Parameter;
     Txt: ISch_GraphicalObject;
-    i, Just: Integer;
+    i, Just, Part: Integer;
     NewX, NewY: Integer;
 begin
     Designator := SchMcpGetString(RequestData, 'designator');
@@ -382,7 +404,12 @@ begin
             Exit;
         end;
 
-        Comp := SchEditFindComponent(SchDoc, Designator);
+        if not SchEditGetPart(RequestData, Part) then
+        begin
+            Result := 'ERROR: part must be a whole number from 1';
+            Exit;
+        end;
+        Comp := SchEditFindComponent(SchDoc, Designator, Part);
         if Comp = nil then
         begin
             Result := 'ERROR: Component not found on sheet: ' + Designator;
@@ -504,6 +531,7 @@ var
     Iter: ISch_Iterator;
     Prim, Found, Replica: ISch_Component;
     Props: TStringList;
+    Part: Integer;
 begin
     LibPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'library_path'));
     LibRef := SchMcpGetString(RequestData, 'lib_reference');
@@ -532,9 +560,17 @@ begin
         Result := 'ERROR: Library not found: ' + LibPath;
         Exit;
     end;
-    if SchEditFindComponent(SchDoc, Designator) <> nil then
+    if not SchEditGetPart(RequestData, Part) then
     begin
-        Result := 'ERROR: Designator already exists on sheet: ' + Designator;
+        Result := 'ERROR: part must be a whole number from 1';
+        Exit;
+    end;
+    if Part = 0 then
+        Part := 1;
+    // A designator may repeat only for another part of a multi-part component.
+    if SchEditFindComponent(SchDoc, Designator, Part) <> nil then
+    begin
+        Result := 'ERROR: Designator already exists on sheet: ' + Designator + ' (part ' + IntToStr(Part) + ')';
         Exit;
     end;
 
@@ -574,9 +610,22 @@ begin
         Result := 'ERROR: Symbol "' + LibRef + '" not found in ' + LibPath;
         Exit;
     end;
+    if Part > Found.PartCount then
+    begin
+        Result := 'ERROR: Symbol "' + LibRef + '" has ' + IntToStr(Found.PartCount) + ' part(s); part ' +
+                  IntToStr(Part) + ' does not exist';
+        Exit;
+    end;
+    if (Part > 1) and (SchEditFindComponent(SchDoc, Designator, 0) <> nil) then
+        if UpperCase(SchEditFindComponent(SchDoc, Designator, 0).LibReference) <> UpperCase(LibRef) then
+        begin
+            Result := 'ERROR: ' + Designator + ' is already a different symbol on this sheet';
+            Exit;
+        end;
 
     Replica := Found.Replicate;
     Replica.Designator.Text := Designator;
+    Replica.CurrentPartID := Part;
     if HasRot then
         Replica.Orientation := SchEditRotationFromDeg(Rot);
     SchEditRegister(SchDoc, Replica);
@@ -586,6 +635,7 @@ begin
     try
         AddJSONProperty(Props, 'designator', Replica.Designator.Text);
         AddJSONProperty(Props, 'lib_reference', Replica.LibReference);
+        AddJSONInteger(Props, 'part', Replica.CurrentPartID);
         AddJSONNumber(Props, 'x', CoordToMils(Replica.Location.X));
         AddJSONNumber(Props, 'y', CoordToMils(Replica.Location.Y));
         AddJSONInteger(Props, 'rotation', SchMcpOrientationDeg(Replica.Orientation));
