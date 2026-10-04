@@ -270,6 +270,8 @@ begin
         begin
             Found := False;
             Iter := Comp.SchIterator_Create;
+            // Direct children only: a sim model's own parameters (e.g. its "Value") are deeper.
+            Iter.SetState_IterationDepth(eIterateFirstLevel);
             Iter.AddFilter_ObjectSet(MkSet(eParameter));
             Param := Iter.FirstSchObject;
             while Param <> nil do
@@ -404,6 +406,7 @@ begin
             begin
                 Txt := nil;
                 Iter := Comp.SchIterator_Create;
+                Iter.SetState_IterationDepth(eIterateFirstLevel);
                 Iter.AddFilter_ObjectSet(MkSet(eParameter));
                 Param := Iter.FirstSchObject;
                 while Param <> nil do
@@ -429,6 +432,7 @@ begin
             begin
                 Txt := nil;
                 Iter := Comp.SchIterator_Create;
+                Iter.SetState_IterationDepth(eIterateFirstLevel);
                 Iter.AddFilter_ObjectSet(MkSet(eParameter));
                 Param := Iter.FirstSchObject;
                 while Param <> nil do
@@ -1073,6 +1077,7 @@ var
     Obj, Dup: ISch_GraphicalObject;
     HasRegion: Boolean;
     L, B, R, T, Copied, ParamCount: Integer;
+    Area, BestArea: Double;
 begin
     NewPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'schematic_path'));
     FormatPath := SchMcpNormalizePath(SchMcpGetString(RequestData, 'copy_format_from'));
@@ -1155,11 +1160,12 @@ begin
             SchEditCopySheetSettings(FormatDoc, NewDoc);
             ParamCount := SchEditCopySheetParameters(FormatDoc, NewDoc, ParamNames);
 
-            // Auto-detect the title block: drawing graphics in the
-            // bottom-right quarter of the sheet.
+            // Auto-detect the title block: the largest drawing graphic in the
+            // bottom-right quarter of the sheet is its outer frame. Logos or
+            // notes drawn nearby are not part of it.
             if not HasRegion then
             begin
-                L := 2000000000; B := 2000000000; R := -2000000000; T := -2000000000;
+                BestArea := 0;
                 Iter := FormatDoc.SchIterator_Create;
                 Iter.SetState_IterationDepth(eIterateFirstLevel);
                 Iter.AddFilter_ObjectSet(MkSet(ePolyline, eLine, eRectangle, eRoundRectangle, eImage, eTextFrame));
@@ -1169,11 +1175,17 @@ begin
                     if (Obj.BoundingRectangle.Left >= FormatDoc.GetState_SheetSizeX div 2) and
                        (Obj.BoundingRectangle.Top <= FormatDoc.GetState_SheetSizeY div 2) then
                     begin
-                        HasRegion := True;
-                        if Obj.BoundingRectangle.Left < L then L := Obj.BoundingRectangle.Left;
-                        if Obj.BoundingRectangle.Bottom < B then B := Obj.BoundingRectangle.Bottom;
-                        if Obj.BoundingRectangle.Right > R then R := Obj.BoundingRectangle.Right;
-                        if Obj.BoundingRectangle.Top > T then T := Obj.BoundingRectangle.Top;
+                        Area := (CoordToMils(Obj.BoundingRectangle.Right) - CoordToMils(Obj.BoundingRectangle.Left)) *
+                                (CoordToMils(Obj.BoundingRectangle.Top) - CoordToMils(Obj.BoundingRectangle.Bottom));
+                        if Area > BestArea then
+                        begin
+                            BestArea := Area;
+                            HasRegion := True;
+                            L := Obj.BoundingRectangle.Left;
+                            B := Obj.BoundingRectangle.Bottom;
+                            R := Obj.BoundingRectangle.Right;
+                            T := Obj.BoundingRectangle.Top;
+                        end;
                     end;
                     Obj := Iter.NextSchObject;
                 end;
